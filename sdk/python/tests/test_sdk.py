@@ -148,3 +148,22 @@ class RunCodeTest(unittest.TestCase):
         self.assertTrue(p2.endswith(".js"))
         self.assertEqual(cmds[0], (f"python3 {p1}; rc=$?; rm -f {p1}; exit $rc", 5))
         self.assertTrue(cmds[1][0].startswith(f"node {p2};"))
+
+
+class IPVersionTest(unittest.TestCase):
+    def test_create_sends_ip_and_exposes_ipv6(self):
+        resp = {"id": "sb_n_1", "template": "base", "state": "running",
+                "info": {"ipv6": "2001:db8:7701:1abc:400:a9ff:fefe:15"}}
+        with mock.patch.object(wbxsandbox.Client, "request", return_value=resp) as req:
+            sb = wbxsandbox.Sandbox.create(ip="dual", url="http://x", api_key="k")
+        body = req.call_args.kwargs["body"]
+        self.assertEqual(body["network"], {"ip": "dual"})
+        self.assertEqual(sb.ipv6, "2001:db8:7701:1abc:400:a9ff:fefe:15")
+        with mock.patch.object(wbxsandbox.Client, "request", return_value={"id": "sb_n_2"}) as req:
+            sb = wbxsandbox.Sandbox.create(internet=False, ip="ipv6", url="http://x", api_key="k")
+        self.assertEqual(req.call_args.kwargs["body"]["network"], {"mode": "none", "ip": "ipv6"})
+        self.assertIsNone(sb.ipv6)
+        with mock.patch.object(wbxsandbox.Client, "request", return_value={"id": "sb_n_3"}) as req:
+            wbxsandbox.Sandbox.create(url="http://x", api_key="k")
+        self.assertNotIn("network", req.call_args.kwargs["body"])
+        self.assertEqual(wbxsandbox.job_body("echo", ip="dual")["network"], {"ip": "dual"})
