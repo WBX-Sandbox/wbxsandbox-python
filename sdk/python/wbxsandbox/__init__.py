@@ -56,7 +56,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterator, List, Optional, Union
 
-__version__ = "0.15.3"
+__version__ = "0.15.4"
 __all__ = ["Sandbox", "CommandResult", "SandboxError", "Client", "Job", "run_job", "get_job", "list_jobs",
            "Batch", "run_batch", "get_batch", "job_input", "batch_input", "get_budget", "set_budget", "runtimes",
            "compute_preferences", "set_default_compute_class", "wait_jobs", "webhook_secret", "verify_webhook"]
@@ -177,7 +177,7 @@ class Sandbox:
                internet: bool = True, allow: Optional[List[str]] = None, block: Optional[List[str]] = None,
                env: Optional[Dict[str, str]] = None, compute_class: Optional[str] = None,
                placement: Optional[str] = None, dependency_cache: Optional[bool] = None,
-               optimize_for: Optional[str] = None) -> "Sandbox":
+               optimize_for: Optional[str] = None, ip: Optional[str] = None) -> "Sandbox":
         """Create a new sandbox.
 
         template  what is preinstalled ("base", "code-interpreter", "browser", "node", ...)
@@ -192,6 +192,9 @@ class Sandbox:
         optimize_for      price | balanced | performance – picks the server inside the class (never changes it)
         placement         auto | fast | spread
         dependency_cache  False = do not use the node's verified package cache
+        ip        "ipv4" | "dual" | "ipv6" – IP version (default: your team's setting, usually ipv4).
+                  With IPv6 the sandbox gets its own public IPv6 address (sandbox.ipv6); "ipv6" = no IPv4
+                  internet (DNS still works). Refused, never downgraded, if no server with IPv6 is free.
         Network settings can only make your team's policy stricter, never looser.
         """
         c = Client(url, api_key)
@@ -213,8 +216,15 @@ class Sandbox:
             body["network"] = {"mode": "allowlist", "allow": list(allow), "block": list(block or [])}
         elif block:
             body["network"] = {"mode": "full", "block": list(block)}
+        if ip:
+            body.setdefault("network", {})["ip"] = ip
         d = c.request("POST", "/v1/sandboxes", body=body)
         return cls._from(d, c)
+
+    @property
+    def ipv6(self) -> Optional[str]:
+        """The sandbox's public IPv6 address (ip="dual" or "ipv6"), otherwise None."""
+        return (self.info or {}).get("ipv6") or None
 
     @classmethod
     def connect(cls, sandbox_id: str, url: Optional[str] = None, api_key: Optional[str] = None) -> "Sandbox":
@@ -479,7 +489,7 @@ def job_body(command: Optional[str] = None, template: Optional[str] = None, time
              wasm_args: Optional[List[str]] = None, wasm_stdin: Optional[str] = None,
              wasm_memory_mb: Optional[int] = None, depends_on: Optional[List[int]] = None,
              optimize_for: Optional[str] = None, max_cost: Union[None, str, float] = None,
-             webhook_url: Optional[str] = None) -> dict:
+             webhook_url: Optional[str] = None, ip: Optional[str] = None) -> dict:
     """The REST body of one job (used by run_job and run_batch). max_cost is in your account's
     billing currency (CZK, EUR or USD); max_cost_eur only works for accounts billed in EUR."""
     import base64
@@ -505,6 +515,8 @@ def job_body(command: Optional[str] = None, template: Optional[str] = None, time
         body["network"] = {"mode": "none"}
     elif allow:
         body["network"] = {"mode": "allowlist", "allow": allow}
+    if ip:
+        body.setdefault("network", {})["ip"] = ip
     if max_cost is not None:
         body["max_cost"] = str(max_cost)
     if webhook_url:
@@ -541,7 +553,7 @@ def run_job(command: Optional[str] = None, template: Optional[str] = None, timeo
     """Submit a background job and return immediately (see Job).
 
     Extra keyword arguments: max_cost (price limit in your account's billing currency – preferred over
-    max_cost_eur), compute_class (without it: your account's default), optimize_for,
+    max_cost_eur), compute_class (without it: your account's default), optimize_for, ip (ipv4 | dual | ipv6),
     placement, dependency_cache, inputs (job_input(...)),
     runtime ("firecracker" | "wasi"), wasm_module (bytes), wasm_module_input, wasm_args, wasm_stdin,
     wasm_memory_mb. A WebAssembly job needs no command and no template.

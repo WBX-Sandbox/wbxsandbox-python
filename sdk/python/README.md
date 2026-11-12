@@ -41,6 +41,13 @@ job.wait()
 print(job.summary()["status"])
 ```
 
+IPv6 – the sandbox gets its own public IPv6 address (`"dual"`, or `"ipv6"` for IPv6-only internet):
+
+```python
+with Sandbox.create(template="base", ip="dual") as sb:
+    print(sb.ipv6)
+```
+
 Interactive terminal in a running sandbox (installed as the `wbx` command):
 
     wbx connect sb_...
