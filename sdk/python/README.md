@@ -45,6 +45,8 @@ Interactive terminal in a running sandbox (installed as the `wbx` command):
 
     wbx connect sb_...
 
+Behind an HTTP proxy, set `HTTPS_PROXY` – the terminal connects through it.
+
 Documentation: https://sandbox.wbx.cz/docs · Pricing: https://sandbox.wbx.cz/pricing
 
 ## Versioning

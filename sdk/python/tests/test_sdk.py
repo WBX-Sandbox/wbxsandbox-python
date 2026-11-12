@@ -126,3 +126,25 @@ class PublicURLTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RunCodeTest(unittest.TestCase):
+    """run_code: každé volání má vlastní soubor (souběžná volání se nepřepíšou) a po sobě ho smaže."""
+
+    def test_unique_file_per_call_and_cleanup(self):
+        files = mock.Mock()
+        cmds = []
+        with mock.patch.object(wbxsandbox.Sandbox, "files", new_callable=mock.PropertyMock, return_value=files):
+            sb = wbxsandbox.Sandbox.__new__(wbxsandbox.Sandbox)
+            sb.id = "sb_test"
+            sb.run = lambda cmd, timeout=None: cmds.append((cmd, timeout)) or wbxsandbox.CommandResult(0, "", "", 0)
+            sb.run_code("print(1)", "python", timeout=5)
+            sb.run_code("console.log(1)", "node")
+            with self.assertRaises(ValueError):
+                sb.run_code("x", "ruby")
+        p1, p2 = (c.args[0] for c in files.write.call_args_list)
+        self.assertNotEqual(p1, p2)
+        self.assertTrue(p1.startswith("/tmp/_wbx_code_") and p1.endswith(".py"))
+        self.assertTrue(p2.endswith(".js"))
+        self.assertEqual(cmds[0], (f"python3 {p1}; rc=$?; rm -f {p1}; exit $rc", 5))
+        self.assertTrue(cmds[1][0].startswith(f"node {p2};"))

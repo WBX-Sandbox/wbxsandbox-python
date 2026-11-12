@@ -52,10 +52,11 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterator, List, Optional, Union
 
-__version__ = "0.15.2"
+__version__ = "0.15.3"
 __all__ = ["Sandbox", "CommandResult", "SandboxError", "Client", "Job", "run_job", "get_job", "list_jobs",
            "Batch", "run_batch", "get_batch", "job_input", "batch_input", "get_budget", "set_budget", "runtimes",
            "compute_preferences", "set_default_compute_class", "wait_jobs", "webhook_secret", "verify_webhook"]
@@ -297,7 +298,8 @@ class Sandbox:
                 elif ev["type"] == "exit":
                     last = ev
             return CommandResult(last.get("exit_code", -1), "".join(out), "".join(err),
-                                 last.get("duration_ms", 0), last.get("timed_out", False))
+                                 last.get("duration_ms", 0), last.get("timed_out", False),
+                                 bool(last.get("truncated", False)))
         http_timeout = (timeout or 0) + 30 if timeout else None
         d = self._c.request("POST", f"/v1/sandboxes/{self.id}/exec",
                             body=self._exec_body(cmd, env, cwd, timeout, stdin),
@@ -320,14 +322,14 @@ class Sandbox:
 
     def run_code(self, code: str, language: str = "python", timeout: Optional[float] = 60) -> CommandResult:
         """Run a piece of code: language "python", "node" or "bash"."""
-        runners = {"python": ("/tmp/_wbx_code.py", "python3 /tmp/_wbx_code.py"),
-                   "node": ("/tmp/_wbx_code.js", "node /tmp/_wbx_code.js"),
-                   "bash": ("/tmp/_wbx_code.sh", "bash /tmp/_wbx_code.sh")}
+        runners = {"python": (".py", "python3"), "node": (".js", "node"), "bash": (".sh", "bash")}
         if language not in runners:
             raise ValueError(f"unsupported language {language!r} (use python, node or bash)")
-        path, cmd = runners[language]
+        ext, interp = runners[language]
+        # own file per call – parallel run_code() calls in one sandbox must not overwrite each other
+        path = f"/tmp/_wbx_code_{uuid.uuid4().hex}{ext}"
         self.files.write(path, code)
-        return self.run(cmd, timeout=timeout)
+        return self.run(f"{interp} {path}; rc=$?; rm -f {path}; exit $rc", timeout=timeout)
 
 
 # --------------------------------------------------------------------------- background jobs
