@@ -7,6 +7,7 @@ import struct
 import sys
 import threading
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
@@ -93,6 +94,44 @@ class TerminalTest(unittest.TestCase):
         with self.assertRaises(terminal.WebSocketError) as e:
             terminal.WebSocket(f"ws://127.0.0.1:{port}/x", {})
         self.assertIn("sandbox not found", str(e.exception))
+
+    def test_connect_through_http_proxy(self):
+        got = {}
+
+        def handler(c, req):  # proxy: CONNECT → 200, pak tentýž socket hraje server WebSocketu
+            got["connect"] = req
+            c.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
+            ws_req = b""
+            while b"\r\n\r\n" not in ws_req:
+                ws_req += c.recv(4096)
+            key = [l.split(": ", 1)[1] for l in ws_req.decode().split("\r\n") if l.lower().startswith("sec-websocket-key")][0]
+            acc = base64.b64encode(hashlib.sha1((key + terminal._GUID).encode()).digest()).decode()
+            c.sendall(("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                       f"Sec-WebSocket-Accept: {acc}\r\n\r\n").encode())
+            c.sendall(_frame(0x1, b"ok"))
+            _read_client_frame(c)
+
+        port = _server(handler)
+        env = {"http_proxy": f"http://user:p%40ss@127.0.0.1:{port}", "no_proxy": "", "NO_PROXY": ""}
+        with mock.patch.dict(os.environ, env):
+            for k in ("HTTP_PROXY", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"):
+                os.environ.pop(k, None)
+            ws = terminal.WebSocket("ws://sandbox.example:8080/v1/sandboxes/sb/terminal", {})
+        self.assertEqual(ws.recv_text(), "ok")
+        ws.close()
+        self.assertTrue(got["connect"].startswith("CONNECT sandbox.example:8080 HTTP/1.1\r\n"))
+        self.assertIn("Proxy-Authorization: Basic " + base64.b64encode(b"user:p@ss").decode(), got["connect"])
+
+    def test_proxy_refusal_is_reported(self):
+        def handler(c, req):
+            c.sendall(b"HTTP/1.1 407 Proxy Authentication Required\r\n\r\n")
+
+        port = _server(handler)
+        with mock.patch.dict(os.environ, {"http_proxy": f"http://127.0.0.1:{port}", "no_proxy": "", "NO_PROXY": ""}):
+            os.environ.pop("HTTP_PROXY", None)
+            with self.assertRaises(terminal.WebSocketError) as e:
+                terminal.WebSocket("ws://sandbox.example/x", {})
+        self.assertIn("407", str(e.exception))
 
     def test_cli_requires_key(self):
         env = os.environ.pop("WBXSANDBOX_API_KEY", None)

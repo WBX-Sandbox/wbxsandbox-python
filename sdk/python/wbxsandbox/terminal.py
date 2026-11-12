@@ -3,6 +3,8 @@
 The terminal runs over a WebSocket on the same address and port as the REST API
 (GET /v1/sandboxes/{id}/terminal), so nothing else has to be reachable. Only the
 Python standard library is used – a minimal WebSocket client is included below.
+Behind an HTTP proxy, set HTTPS_PROXY (NO_PROXY is respected); the connection is
+tunnelled with CONNECT.
 
     wbx connect sb_n01_0123456789abcdef
 
@@ -22,8 +24,8 @@ import ssl
 import struct
 import sys
 import threading
-import time
 import urllib.parse
+import urllib.request
 from typing import Callable, Optional, Tuple
 
 _GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -43,7 +45,11 @@ class WebSocket:
             raise WebSocketError(f"unsupported URL scheme: {u.scheme}")
         host = u.hostname or ""
         port = u.port or (443 if u.scheme == "wss" else 80)
-        raw = socket.create_connection((host, port), timeout=timeout)
+        proxy = _proxy_for(u.scheme, host)
+        if proxy:
+            raw = _connect_via_proxy(proxy, host, port, timeout)
+        else:
+            raw = socket.create_connection((host, port), timeout=timeout)
         if u.scheme == "wss":
             raw = ssl.create_default_context().wrap_socket(raw, server_hostname=host)
         self.sock = raw
@@ -154,6 +160,49 @@ class WebSocket:
             self.sock.close()
         except OSError:
             pass
+
+
+def _proxy_for(scheme: str, host: str) -> Optional[str]:
+    """Proxy from HTTPS_PROXY / HTTP_PROXY (wss / ws), unless NO_PROXY excludes the host."""
+    try:
+        if urllib.request.proxy_bypass(host):
+            return None
+    except OSError:
+        pass
+    return urllib.request.getproxies().get("https" if scheme == "wss" else "http") or None
+
+
+def _connect_via_proxy(proxy: str, host: str, port: int, timeout: float) -> socket.socket:
+    """TCP tunnel through an HTTP proxy (CONNECT host:port), optionally with basic auth."""
+    p = urllib.parse.urlsplit(proxy if "://" in proxy else "http://" + proxy)
+    if p.scheme not in ("http", ""):
+        raise WebSocketError(f"unsupported proxy scheme: {p.scheme} (use an http:// proxy)")
+    sock = socket.create_connection((p.hostname or "", p.port or 8080), timeout=timeout)
+    target = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+    lines = [f"CONNECT {target} HTTP/1.1", f"Host: {target}"]
+    if p.username is not None:
+        cred = f"{urllib.parse.unquote(p.username)}:{urllib.parse.unquote(p.password or '')}"
+        lines.append("Proxy-Authorization: Basic " + base64.b64encode(cred.encode()).decode())
+    try:
+        sock.sendall(("\r\n".join(lines) + "\r\n\r\n").encode())
+        buf = b""
+        while b"\r\n\r\n" not in buf:
+            chunk = sock.recv(4096)
+            if not chunk:
+                raise WebSocketError("the proxy closed the connection")
+            buf += chunk
+            if len(buf) > 65536:
+                raise WebSocketError("proxy response too large")
+        first = buf.split(b"\r\n", 1)[0]
+        status = first.split(b" ", 2)
+        if len(status) < 2 or status[1] != b"200":
+            raise WebSocketError(f"the proxy refused the connection: {first.decode(errors='replace')}")
+        if buf.index(b"\r\n\r\n") + 4 != len(buf):
+            raise WebSocketError("unexpected data from the proxy")
+    except BaseException:
+        sock.close()
+        raise
+    return sock
 
 
 def terminal_url(api_url: str, sandbox_id: str, cols: int, rows: int) -> str:
@@ -293,7 +342,10 @@ def connect(sandbox_id: str, url: Optional[str] = None, api_key: Optional[str] =
             size = _size()
             if size != last:
                 last = size
-                ws.send_text(json.dumps({"type": "resize", "cols": size[0], "rows": size[1]}))
+                try:
+                    ws.send_text(json.dumps({"type": "resize", "cols": size[0], "rows": size[1]}))
+                except OSError:
+                    break
             if not data:
                 continue
             if _DETACH in data:
