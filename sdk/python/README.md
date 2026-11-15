@@ -50,6 +50,22 @@ job.wait()
 print(job.summary()["status"])
 ```
 
+Signed execution receipts – after the job ends, WBX signs its receipt (Ed25519): command,
+exact template build, input and output file checksums. Anyone with the public key can check it
+was not edited (`pip install "wbxsandbox[verify]"`):
+
+```python
+from wbxsandbox import receipt_keys, verify_receipt
+
+signed = job.signed_receipt()                     # keep or send the whole envelope
+key = receipt_keys()[0]["public_key"]             # pin this key instead of fetching it each time
+receipt = verify_receipt(signed, key)["execution_receipt"]   # ValueError if anything was changed
+print(receipt["template_build"]["image_digest"], receipt["artifacts"])
+```
+
+The signature proves WBX issued the receipt unchanged – not that the computation could not
+have been altered.
+
 IPv6 – the sandbox gets its own public IPv6 address (`"dual"`, or `"ipv6"` for IPv6-only internet):
 
 ```python

@@ -1,7 +1,7 @@
 """WBX Sandbox – Python SDK.
 
 Isolated cloud sandboxes (Firecracker microVMs) for AI agents. No dependencies –
-only the Python standard library.
+only the Python standard library (verify_receipt needs the optional cryptography package).
 
     from wbxsandbox import Sandbox
 
@@ -57,10 +57,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable, Dict, Iterator, List, Optional, Union
 
-__version__ = "0.15.5"
+__version__ = "0.15.6"
 __all__ = ["Sandbox", "CommandResult", "SandboxError", "Client", "Job", "run_job", "get_job", "list_jobs",
            "Batch", "run_batch", "get_batch", "list_batches", "job_input", "batch_input", "get_budget", "set_budget", "runtimes",
-           "compute_preferences", "set_default_compute_class", "wait_jobs", "webhook_secret", "verify_webhook"]
+           "compute_preferences", "set_default_compute_class", "wait_jobs", "webhook_secret", "verify_webhook",
+           "receipt_keys", "verify_receipt"]
 
 
 class SandboxError(Exception):
@@ -454,8 +455,14 @@ class Job:
                 time.sleep(poll)
 
     def receipt(self) -> dict:
-        """The execution receipt (inputs, runtime, exit code, measured usage, file checksums, cost)."""
+        """The execution receipt (inputs, template build, runtime, exit code, measured usage, file checksums, cost)."""
         return self._c.request("GET", f"/v1/jobs/{self.id}/receipt")["execution_receipt"]
+
+    def signed_receipt(self) -> dict:
+        """The receipt signed by WBX (Ed25519) – only once the job has ended. Keep or send the whole
+        envelope; anyone can check it with verify_receipt(). The signature proves WBX issued the receipt
+        unchanged, not that the computation could not have been altered."""
+        return self._c.request("GET", f"/v1/jobs/{self.id}/receipt", query={"signed": "1"})["signed_receipt"]
 
     def artifacts(self) -> List[dict]:
         return self._c.request("GET", f"/v1/jobs/{self.id}/artifacts")["artifacts"]
@@ -714,6 +721,43 @@ def verify_webhook(secret: str, body: bytes, signature: str, tolerance_s: int = 
         return False
     mac = hmac.new(secret.encode(), f"{t}.".encode() + body, hashlib.sha256).hexdigest()
     return hmac.compare_digest(mac, parts.get("v1", ""))
+
+
+def receipt_keys(url: Optional[str] = None) -> List[dict]:
+    """Public keys that sign receipts (no API key needed). Pin the key you trust instead of fetching
+    it every time from the same server whose receipts you check."""
+    return Client(url, "").request("GET", "/v1/receipt-keys")["keys"]
+
+
+def verify_receipt(signed: dict, public_key: Optional[str] = None, url: Optional[str] = None) -> dict:
+    """Check a signed receipt (Job.signed_receipt()) and return what was signed: {"execution_receipt": ...,
+    "key_id": ..., "signed_at": ...}. public_key = base64 Ed25519 key from receipt_keys(); without it the
+    key is fetched from the server (url). Raises ValueError when the signature does not match.
+
+    Needs the optional package cryptography: pip install "wbxsandbox[verify]"."""
+    import base64
+    try:
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    except ImportError:
+        raise ImportError('verify_receipt needs the cryptography package: pip install "wbxsandbox[verify]"') from None
+    if signed.get("alg") != "Ed25519" or signed.get("format") != "wbx-signed-receipt-1":
+        raise ValueError("unsupported receipt signature format")
+    if public_key is None:
+        keys = [k for k in receipt_keys(url) if k.get("key_id") == signed.get("key_id")]
+        if not keys:
+            raise ValueError(f"unknown signing key {signed.get('key_id')!r}")
+        public_key = keys[0]["public_key"]
+    try:
+        payload = base64.b64decode(signed["payload"], validate=True)
+        sig = base64.b64decode(signed["signature"], validate=True)
+        Ed25519PublicKey.from_public_bytes(base64.b64decode(public_key, validate=True)).verify(sig, payload)
+    except (InvalidSignature, ValueError, KeyError):
+        raise ValueError("receipt signature does not match") from None
+    out = json.loads(payload)
+    if out.get("key_id") != signed.get("key_id"):
+        raise ValueError("key_id in the payload does not match the envelope")
+    return out
 
 
 def get_budget(url: Optional[str] = None, api_key: Optional[str] = None) -> dict:

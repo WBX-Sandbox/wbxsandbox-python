@@ -167,3 +167,45 @@ class IPVersionTest(unittest.TestCase):
             wbxsandbox.Sandbox.create(url="http://x", api_key="k")
         self.assertNotIn("network", req.call_args.kwargs["body"])
         self.assertEqual(wbxsandbox.job_body("echo", ip="dual")["network"], {"ip": "dual"})
+
+
+class VerifyReceiptTest(unittest.TestCase):
+    """Ověření podepsané účtenky (Ed25519) – bez sítě, s dočasným testovacím klíčem."""
+
+    def _signed(self, payload: dict):
+        import base64
+        import json
+        try:
+            from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+            from cryptography.hazmat.primitives import serialization
+        except ImportError:
+            self.skipTest("cryptography chybí")
+        k = Ed25519PrivateKey.generate()
+        raw = json.dumps(payload).encode()
+        pub = k.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+        env = {"format": "wbx-signed-receipt-1", "alg": "Ed25519", "key_id": payload["key_id"],
+               "payload": base64.b64encode(raw).decode(), "signature": base64.b64encode(k.sign(raw)).decode()}
+        return env, base64.b64encode(pub).decode()
+
+    def test_valid_and_tampered(self):
+        import base64
+        env, pub = self._signed({"format": "wbx-signed-receipt-1", "key_id": "wbx-1", "execution_receipt": {"job_id": "j1", "exit_code": 0}})
+        self.assertEqual(wbxsandbox.verify_receipt(env, pub)["execution_receipt"]["job_id"], "j1")
+        bad = dict(env, payload=base64.b64encode(b'{"key_id":"wbx-1","execution_receipt":{"exit_code":1}}').decode())
+        with self.assertRaises(ValueError):
+            wbxsandbox.verify_receipt(bad, pub)
+        with self.assertRaises(ValueError):
+            wbxsandbox.verify_receipt(dict(env, signature="!!"), pub)
+        with self.assertRaises(ValueError):
+            wbxsandbox.verify_receipt(dict(env, alg="HS256"), pub)
+
+    def test_key_id_must_match(self):
+        env, pub = self._signed({"key_id": "wbx-other", "execution_receipt": {}})
+        with self.assertRaises(ValueError):
+            wbxsandbox.verify_receipt(dict(env, key_id="wbx-1"), pub)
+
+    def test_without_cryptography(self):
+        with mock.patch.dict(sys.modules, {"cryptography": None, "cryptography.exceptions": None,
+                                           "cryptography.hazmat.primitives.asymmetric.ed25519": None}):
+            with self.assertRaisesRegex(ImportError, "wbxsandbox\\[verify\\]"):
+                wbxsandbox.verify_receipt({}, "x")

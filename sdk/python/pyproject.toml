@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wbxsandbox"
-version = "0.15.5"
+version = "0.15.6"
 description = "Python SDK for WBX Sandbox – isolated cloud sandboxes (Firecracker microVMs) for AI agents"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -19,6 +19,9 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: System :: Distributed Computing",
 ]
+
+[project.optional-dependencies]
+verify = ["cryptography>=41"]
 
 [project.urls]
 Homepage = "https://sandbox.wbx.cz"
