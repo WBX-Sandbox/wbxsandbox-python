@@ -31,6 +31,15 @@ with Sandbox.create(template="base", timeout=300) as sb:
 # the sandbox is destroyed when the block ends
 ```
 
+A named sandbox that falls asleep instead of being destroyed – its files are there next time:
+
+```python
+sb = Sandbox.create(template="base", name="my-project", on_timeout="pause", idle_timeout=600)
+sb.files.write("/home/user/notes.txt", "kept while asleep")
+sb.sleep()                                   # files kept, programs stop, no compute billed
+sb = Sandbox.create(name="my-project")       # same sandbox, woken up
+```
+
 Background jobs and batches:
 
 ```python

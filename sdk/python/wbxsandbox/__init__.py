@@ -54,11 +54,12 @@ import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Callable, Dict, Iterator, List, Optional, Union
 
-__version__ = "0.15.4"
+__version__ = "0.15.5"
 __all__ = ["Sandbox", "CommandResult", "SandboxError", "Client", "Job", "run_job", "get_job", "list_jobs",
-           "Batch", "run_batch", "get_batch", "job_input", "batch_input", "get_budget", "set_budget", "runtimes",
+           "Batch", "run_batch", "get_batch", "list_batches", "job_input", "batch_input", "get_budget", "set_budget", "runtimes",
            "compute_preferences", "set_default_compute_class", "wait_jobs", "webhook_secret", "verify_webhook"]
 
 
@@ -152,9 +153,17 @@ class Files:
             data = data.encode()
         self._sb._c.request("PUT", f"/v1/sandboxes/{self._sb.id}/files", body=data, query={"path": path})
 
-    def remove(self, path: str) -> None:
-        """Delete a file or a directory."""
+    def remove(self, path: str, recursive: bool = False) -> None:
+        """Delete a file or an empty directory; recursive=True deletes a directory with its contents."""
+        if recursive:
+            self._sb._c.request("POST", f"/v1/sandboxes/{self._sb.id}/fs/remove",
+                                body={"path": path, "recursive": True})
+            return
         self._sb._c.request("DELETE", f"/v1/sandboxes/{self._sb.id}/files", query={"path": path})
+
+    def mkdir(self, path: str) -> None:
+        """Create a directory (with missing parents); an existing directory is not an error."""
+        self._sb._c.request("POST", f"/v1/sandboxes/{self._sb.id}/fs/mkdir", body={"path": path, "parents": True})
 
     def list(self, path: str = "/home/user") -> List[dict]:
         """List a directory: [{"name": ..., "is_dir": bool, "size": bytes}, ...]."""
@@ -177,7 +186,9 @@ class Sandbox:
                internet: bool = True, allow: Optional[List[str]] = None, block: Optional[List[str]] = None,
                env: Optional[Dict[str, str]] = None, compute_class: Optional[str] = None,
                placement: Optional[str] = None, dependency_cache: Optional[bool] = None,
-               optimize_for: Optional[str] = None, ip: Optional[str] = None) -> "Sandbox":
+               optimize_for: Optional[str] = None, ip: Optional[str] = None,
+               name: Optional[str] = None, on_timeout: Optional[str] = None,
+               idle_timeout: Optional[int] = None) -> "Sandbox":
         """Create a new sandbox.
 
         template  what is preinstalled ("base", "code-interpreter", "browser", "node", ...)
@@ -195,6 +206,12 @@ class Sandbox:
         ip        "ipv4" | "dual" | "ipv6" – IP version (default: your team's setting, usually ipv4).
                   With IPv6 the sandbox gets its own public IPv6 address (sandbox.ipv6); "ipv6" = no IPv4
                   internet (DNS still works). Refused, never downgraded, if no server with IPv6 is free.
+        name      optional name ("my-project"); if you already have a sandbox with this name it is
+                  returned instead of a new one (woken up if it is asleep)
+        on_timeout  "kill" (default) destroys the sandbox when its lifetime ends; "pause" puts it to
+                  sleep instead: files are kept (several days), running programs stop, and the next
+                  command wakes it up in a few seconds
+        idle_timeout  with on_timeout="pause": fall asleep after this many seconds without commands
         Network settings can only make your team's policy stricter, never looser.
         """
         c = Client(url, api_key)
@@ -218,6 +235,12 @@ class Sandbox:
             body["network"] = {"mode": "full", "block": list(block)}
         if ip:
             body.setdefault("network", {})["ip"] = ip
+        if name:
+            body["name"] = name
+        if on_timeout:
+            body["on_timeout"] = on_timeout
+        if idle_timeout:
+            body["idle_timeout_s"] = int(idle_timeout)
         d = c.request("POST", "/v1/sandboxes", body=body)
         return cls._from(d, c)
 
@@ -234,7 +257,7 @@ class Sandbox:
 
     @classmethod
     def list(cls, url: Optional[str] = None, api_key: Optional[str] = None) -> List["Sandbox"]:
-        """Your running and paused sandboxes."""
+        """Your running, paused and sleeping sandboxes."""
         c = Client(url, api_key)
         return [cls._from(d, c) for d in c.request("GET", "/v1/sandboxes")]
 
@@ -271,8 +294,13 @@ class Sandbox:
         """Freeze the sandbox (memory and files are kept, you don't pay while paused)."""
         self.state = self._c.request("POST", f"/v1/sandboxes/{self.id}/pause")["state"]
 
+    def sleep(self) -> None:
+        """Put the sandbox to sleep: files are kept, running programs stop, no compute is billed.
+        Any later command (or resume()) wakes it up in a few seconds."""
+        self.state = self._c.request("POST", f"/v1/sandboxes/{self.id}/sleep")["state"]
+
     def resume(self) -> None:
-        """Continue a paused sandbox exactly where it stopped."""
+        """Continue a paused sandbox exactly where it stopped, or wake up a sleeping one."""
         self.state = self._c.request("POST", f"/v1/sandboxes/{self.id}/resume")["state"]
 
     def __enter__(self) -> "Sandbox":
@@ -737,10 +765,42 @@ def get_job(job_id: str, url: Optional[str] = None, api_key: Optional[str] = Non
     return Job(c.request("GET", f"/v1/jobs/{job_id}"), c)
 
 
+def _since(since: Union[None, str, datetime]) -> Optional[str]:
+    if since is None or since == "":
+        return None
+    if isinstance(since, datetime):
+        if since.tzinfo is None:
+            since = since.replace(tzinfo=timezone.utc)
+        return since.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return since
+
+
 def list_jobs(status: Optional[str] = None, limit: int = 50, url: Optional[str] = None,
-              api_key: Optional[str] = None) -> List[dict]:
-    """Your jobs, newest first (short summaries)."""
+              api_key: Optional[str] = None, batch_id: Optional[str] = None,
+              since: Union[None, str, datetime] = None, cursor: Optional[str] = None) -> List[dict]:
+    """Your jobs, newest first (short summaries, each with a shortened ``command``).
+
+    since: a datetime or an RFC 3339 time ("2026-11-15T08:00:00Z"); cursor: the ``id`` of the last job
+    of the previous page.
+    """
     q = {"limit": limit}
     if status:
         q["status"] = status
+    if batch_id:
+        q["batch_id"] = batch_id
+    if _since(since):
+        q["since"] = _since(since)
+    if cursor:
+        q["cursor"] = cursor
     return Client(url, api_key).request("GET", "/v1/jobs", query=q)["jobs"]
+
+
+def list_batches(limit: int = 20, since: Union[None, str, datetime] = None, cursor: Optional[str] = None,
+                 url: Optional[str] = None, api_key: Optional[str] = None) -> List[dict]:
+    """Your batches, newest first (summaries). cursor: the ``id`` of the last batch of the previous page."""
+    q = {"limit": limit}
+    if _since(since):
+        q["since"] = _since(since)
+    if cursor:
+        q["cursor"] = cursor
+    return Client(url, api_key).request("GET", "/v1/batches", query=q)["batches"]
