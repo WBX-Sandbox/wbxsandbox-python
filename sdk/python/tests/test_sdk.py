@@ -191,6 +191,8 @@ class VerifyReceiptTest(unittest.TestCase):
         import base64
         env, pub = self._signed({"format": "wbx-signed-receipt-1", "key_id": "wbx-1", "execution_receipt": {"job_id": "j1", "exit_code": 0}})
         self.assertEqual(wbxsandbox.verify_receipt(env, pub)["execution_receipt"]["job_id"], "j1")
+        # celá odpověď API / soubor z portálu
+        self.assertEqual(wbxsandbox.verify_receipt({"signed_receipt": env, "final": True}, pub)["key_id"], "wbx-1")
         bad = dict(env, payload=base64.b64encode(b'{"key_id":"wbx-1","execution_receipt":{"exit_code":1}}').decode())
         with self.assertRaises(ValueError):
             wbxsandbox.verify_receipt(bad, pub)

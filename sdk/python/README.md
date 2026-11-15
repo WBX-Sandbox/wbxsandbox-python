@@ -57,7 +57,7 @@ was not edited (`pip install "wbxsandbox[verify]"`):
 ```python
 from wbxsandbox import receipt_keys, verify_receipt
 
-signed = job.signed_receipt()                     # keep or send the whole envelope
+signed = job.signed_receipt()                     # keep or send it; the portal's "Download signed receipt" file works too
 key = receipt_keys()[0]["public_key"]             # pin this key instead of fetching it each time
 receipt = verify_receipt(signed, key)["execution_receipt"]   # ValueError if anything was changed
 print(receipt["template_build"]["image_digest"], receipt["artifacts"])

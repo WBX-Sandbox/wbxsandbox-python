@@ -57,7 +57,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable, Dict, Iterator, List, Optional, Union
 
-__version__ = "0.15.6"
+__version__ = "0.15.7"
 __all__ = ["Sandbox", "CommandResult", "SandboxError", "Client", "Job", "run_job", "get_job", "list_jobs",
            "Batch", "run_batch", "get_batch", "list_batches", "job_input", "batch_input", "get_budget", "set_budget", "runtimes",
            "compute_preferences", "set_default_compute_class", "wait_jobs", "webhook_secret", "verify_webhook",
@@ -730,9 +730,10 @@ def receipt_keys(url: Optional[str] = None) -> List[dict]:
 
 
 def verify_receipt(signed: dict, public_key: Optional[str] = None, url: Optional[str] = None) -> dict:
-    """Check a signed receipt (Job.signed_receipt()) and return what was signed: {"execution_receipt": ...,
-    "key_id": ..., "signed_at": ...}. public_key = base64 Ed25519 key from receipt_keys(); without it the
-    key is fetched from the server (url). Raises ValueError when the signature does not match.
+    """Check a signed receipt and return what was signed: {"execution_receipt": ..., "key_id": ...,
+    "signed_at": ...}. signed = Job.signed_receipt(), or the whole API response / file downloaded from
+    the portal ({"signed_receipt": ...}). public_key = base64 Ed25519 key from receipt_keys(); without it
+    the key is fetched from the server (url). Raises ValueError when the signature does not match.
 
     Needs the optional package cryptography: pip install "wbxsandbox[verify]"."""
     import base64
@@ -741,6 +742,8 @@ def verify_receipt(signed: dict, public_key: Optional[str] = None, url: Optional
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
     except ImportError:
         raise ImportError('verify_receipt needs the cryptography package: pip install "wbxsandbox[verify]"') from None
+    if isinstance(signed.get("signed_receipt"), dict):  # API response or file downloaded from the portal
+        signed = signed["signed_receipt"]
     if signed.get("alg") != "Ed25519" or signed.get("format") != "wbx-signed-receipt-1":
         raise ValueError("unsupported receipt signature format")
     if public_key is None:

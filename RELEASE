@@ -1,3 +1,3 @@
-version: 0.15.59
-commit: 65a98e7ab5312145dc2d434645657483c821d432
+version: 0.15.60
+commit: a6afd2f00a8481fa4348baec8d5761600db4c3d8
 source: sdk/python of the WBX Sandbox platform release above (copied unchanged)
