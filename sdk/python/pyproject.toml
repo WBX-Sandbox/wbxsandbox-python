@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 dependencies = []
 license = "MIT"
-authors = [{ name = "KXCOMM s.r.o." }]
+authors = [{ name = "WBX Sandbox" }]
 keywords = ["sandbox", "firecracker", "microvm", "ai agents", "code execution", "wbx"]
 classifiers = [
     "Development Status :: 4 - Beta",
