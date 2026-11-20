@@ -57,18 +57,80 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable, Dict, Iterator, List, Optional, Union
 
-__version__ = "0.15.7"
-__all__ = ["Sandbox", "CommandResult", "SandboxError", "Client", "Job", "run_job", "get_job", "list_jobs",
+__version__ = "0.15.10"
+__all__ = ["Sandbox", "CommandResult", "SandboxError", "ComputerActionError", "Client", "Computer", "Screenshot", "Job", "run_job", "get_job", "list_jobs",
            "Batch", "run_batch", "get_batch", "list_batches", "job_input", "batch_input", "get_budget", "set_budget", "runtimes",
            "compute_preferences", "set_default_compute_class", "wait_jobs", "webhook_secret", "verify_webhook",
-           "receipt_keys", "verify_receipt"]
+           "receipt_keys", "verify_receipt", "features"]
 
 
 class SandboxError(Exception):
-    def __init__(self, status: int, message: str):
+    """An error of the API or of the SDK.
+
+    status       HTTP status of the response; 0 when there was no HTTP error response
+                 (the server could not be reached, or the SDK found the error itself)
+    message      human-readable message ("error" of the JSON body, or the raw text)
+    code         machine-readable code from the JSON body ("quota", "queue_full",
+                 "feature_disabled", "human_in_control", ...) or None
+    retry_after  seconds the server asked to wait before retrying (Retry-After header,
+                 seconds or an HTTP date), or None – sent with some 429 and 503 responses
+    body         the parsed JSON error body (dict), the raw text when it was not JSON, or None
+    """
+
+    def __init__(self, status: int, message: str, code: Optional[str] = None,
+                 retry_after: Optional[float] = None, body: Union[None, dict, str] = None):
         super().__init__(f"HTTP {status}: {message}")
         self.status = status
         self.message = message
+        self.code = code
+        self.retry_after = retry_after
+        self.body = body
+
+
+class ComputerActionError(SandboxError):
+    """A desktop action failed (raised by the sandbox.computer shortcuts such as click() or type()).
+
+    The server answers such a failure with HTTP 200 and ok=false, so status is 200 – unlike
+    status 0, which means the server could not be reached.
+
+    failed_index  index of the action that failed (the actions before it were performed)
+    results       one {"type", "ok", "error"?} entry per performed action, the failed one last
+    response      the whole response of the actions request
+    """
+
+    def __init__(self, message: str, failed_index: int = 0, results: Optional[List[dict]] = None,
+                 response: Optional[dict] = None):
+        super().__init__(200, message, body=response)
+        self.failed_index = failed_index
+        self.results = list(results or [])
+        self.response = response
+
+    def __str__(self) -> str:
+        return f"desktop action {self.failed_index} failed: {self.message}"
+
+
+def _parse_retry_after(value: Optional[str], now: Optional[float] = None) -> Optional[float]:
+    """Retry-After (delay in seconds or an HTTP date) as seconds, or None."""
+    if value is None:
+        return None
+    v = value.strip()
+    if not v:
+        return None
+    try:
+        secs = float(v)
+        return secs if secs >= 0 else None
+    except ValueError:
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+        t = parsedate_to_datetime(v)
+    except (TypeError, ValueError, IndexError):
+        return None
+    if t is None:
+        return None
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=timezone.utc)
+    return max(0.0, t.timestamp() - (time.time() if now is None else now))
 
 
 @dataclass
@@ -117,12 +179,24 @@ class Client:
         try:
             resp = urllib.request.urlopen(req, timeout=timeout or self.timeout)
         except urllib.error.HTTPError as e:
-            raw = e.read().decode(errors="replace")
             try:
-                msg = json.loads(raw).get("error", raw)
+                raw = e.read().decode(errors="replace")
+            except Exception:  # noqa: BLE001 – the body is optional
+                raw = ""
+            body: Union[None, dict, str] = raw or None
+            msg, code = raw, None
+            try:
+                parsed = json.loads(raw)
             except ValueError:
-                msg = raw
-            raise SandboxError(e.code, msg) from None
+                parsed = None
+            if isinstance(parsed, dict):
+                body = parsed
+                if isinstance(parsed.get("error"), str):
+                    msg = parsed["error"]
+                if isinstance(parsed.get("code"), str):
+                    code = parsed["code"]
+            retry_after = _parse_retry_after(e.headers.get("Retry-After") if e.headers is not None else None)
+            raise SandboxError(e.code, msg, code=code, retry_after=retry_after, body=body) from None
         except urllib.error.URLError as e:
             raise SandboxError(0, f"cannot connect to {self.url}: {e.reason}") from None
         if stream:
@@ -172,6 +246,152 @@ class Files:
 
 
 @dataclass
+class Screenshot:
+    """A screenshot of the sandbox desktop (sandbox.computer.screenshot())."""
+    data: bytes
+    format: str            # "png" or "jpeg"
+    width: int             # image size in pixels
+    height: int
+    screen_width: int = 0  # screen size in pixels – mouse coordinates use these
+    screen_height: int = 0
+
+    def save(self, path: str) -> None:
+        """Write the image to a local file."""
+        with open(path, "wb") as f:
+            f.write(self.data)
+
+
+class Computer:
+    """The graphical desktop of a sandbox (sandbox.computer) – beta, needs the "desktop" template
+    and the Desktop & Computer Use feature enabled for your account.
+
+        with Sandbox.create(template="desktop") as sb:
+            sb.computer.click(640, 400)
+            sb.computer.type("hello")
+            sb.computer.key("ctrl+a")
+            sb.computer.screenshot().save("screen.png")
+
+    Coordinates are screen pixels, (0, 0) is the top left corner. While a person controls the
+    desktop from the portal, actions raise SandboxError with status 409 and code
+    "human_in_control" (screenshots still work).
+
+    actions() returns the response as it is, also when an action failed (ok=False, failed_index,
+    results). The shortcuts (move, click, type, ...) raise ComputerActionError instead.
+    """
+
+    def __init__(self, sb: "Sandbox"):
+        self._sb = sb
+
+    def _path(self, op: str) -> str:
+        return f"/v1/sandboxes/{self._sb.id}/computer/{op}"
+
+    def status(self) -> dict:
+        """Desktop state: available, display, width, height, controller ("agent" or "human"),
+        controller_until (unix ms or None), viewers – and reason when not available.
+        Does not wake a sleeping sandbox."""
+        return self._sb._c.request("GET", self._path("status"))
+
+    def screenshot(self, format: str = "png", quality: Optional[int] = None,
+                   max_width: Optional[int] = None) -> Screenshot:
+        """Take a screenshot. format "png" or "jpeg", quality 1–100 (jpeg), max_width scales the
+        image down (mouse coordinates stay in screen pixels). Does not wake a sleeping sandbox."""
+        query = {"format": format}
+        if quality is not None:
+            query["quality"] = int(quality)
+        if max_width:
+            query["max_width"] = int(max_width)
+        resp = self._sb._c.request("GET", self._path("screenshot"), query=query, stream=True)
+        with resp:
+            data = resp.read()
+            h = resp.headers
+            ctype = h.get("Content-Type", "")
+            if ctype not in ("image/png", "image/jpeg"):
+                raise SandboxError(0, f"unexpected screenshot type {ctype!r}")
+
+            def num(k: str) -> int:
+                try:
+                    return int(h.get(k) or 0)
+                except ValueError:
+                    return 0
+            return Screenshot(data=data, format=ctype.split("/", 1)[1], width=num("X-WBX-Width"),
+                              height=num("X-WBX-Height"), screen_width=num("X-WBX-Screen-Width"),
+                              screen_height=num("X-WBX-Screen-Height"))
+
+    def actions(self, actions: List[dict], screenshot: bool = False, screenshot_format: Optional[str] = None,
+                screenshot_quality: Optional[int] = None, screenshot_max_width: Optional[int] = None) -> dict:
+        """Run up to 50 actions in order, e.g.
+        [{"type": "click", "x": 10, "y": 20}, {"type": "type", "text": "hi"}, {"type": "key", "keys": "Return"}].
+        Types: move, click (button, count), mouse_down, mouse_up, drag (to_x, to_y), scroll (dx, dy),
+        type (text), key (keys), wait (ms). Returns {"ok", "results", ...}; with screenshot=True also
+        "screenshot": {"format", "width", "height", "data_base64", ...}. Wakes a sleeping sandbox.
+
+        A failed action does not raise here: the server stops at it and answers ok=False with
+        "error" and "failed_index" (the actions before it were performed). The HTTP timeout is
+        300 s, as long actions (typing, waits) can take more than a minute."""
+        body: Dict = {"actions": list(actions), "screenshot": bool(screenshot)}
+        if screenshot:
+            if screenshot_format:
+                body["screenshot_format"] = screenshot_format
+            if screenshot_quality:
+                body["screenshot_quality"] = int(screenshot_quality)
+            if screenshot_max_width:
+                body["screenshot_max_width"] = int(screenshot_max_width)
+        return self._sb._c.request("POST", self._path("actions"), body=body, timeout=300)
+
+    def control(self, mode: str, ttl_s: Optional[int] = None) -> dict:
+        """Who controls the desktop. A person takes control ("human") only in the portal – with an
+        API key that is refused (403); "agent" succeeds when no person is in control. Returns the status."""
+        body: Dict = {"mode": mode}
+        if ttl_s is not None:
+            body["ttl_s"] = int(ttl_s)
+        return self._sb._c.request("POST", self._path("control"), body=body)
+
+    # zkratky pro jednotlivé akce (každá je jeden požadavek)
+    def _one(self, action: dict) -> dict:
+        r = self.actions([action])
+        if not r.get("ok", False):
+            idx = r.get("failed_index")
+            results = r.get("results") or []
+            if not isinstance(idx, int) or isinstance(idx, bool):
+                idx = max(0, len(results) - 1)
+            raise ComputerActionError(r.get("error") or "the action failed", idx, results, r)
+        return r
+
+    def move(self, x: int, y: int) -> dict:
+        return self._one({"type": "move", "x": int(x), "y": int(y)})
+
+    def click(self, x: int, y: int, button: str = "left", count: int = 1) -> dict:
+        return self._one({"type": "click", "x": int(x), "y": int(y), "button": button, "count": int(count)})
+
+    def double_click(self, x: int, y: int) -> dict:
+        return self.click(x, y, count=2)
+
+    def drag(self, x: int, y: int, to_x: int, to_y: int, button: str = "left") -> dict:
+        return self._one({"type": "drag", "x": int(x), "y": int(y), "to_x": int(to_x), "to_y": int(to_y), "button": button})
+
+    def scroll(self, x: int, y: int, dy: int = 0, dx: int = 0) -> dict:
+        """Scroll at (x, y): dy wheel steps down (negative = up), dx to the right (negative = left).
+
+        Note the order: the third positional argument is dy (vertical), the fourth dx – the
+        TypeScript SDK takes scroll(x, y, dx, dy). Pass them by name to avoid mistakes:
+        scroll(640, 400, dy=5) or scroll(640, 400, dx=-2)."""
+        a = {"type": "scroll", "x": int(x), "y": int(y)}
+        if dy:
+            a["dy"] = int(dy)
+        if dx:
+            a["dx"] = int(dx)
+        return self._one(a)
+
+    def type(self, text: str) -> dict:
+        """Type text (up to 4096 characters; newlines press Enter)."""
+        return self._one({"type": "type", "text": text})
+
+    def key(self, keys: str) -> dict:
+        """Press a key or combination, e.g. "Return", "ctrl+c", "ctrl+shift+t"."""
+        return self._one({"type": "key", "keys": keys})
+
+
+@dataclass
 class Sandbox:
     id: str
     template: str = ""
@@ -189,7 +409,7 @@ class Sandbox:
                placement: Optional[str] = None, dependency_cache: Optional[bool] = None,
                optimize_for: Optional[str] = None, ip: Optional[str] = None,
                name: Optional[str] = None, on_timeout: Optional[str] = None,
-               idle_timeout: Optional[int] = None) -> "Sandbox":
+               idle_timeout: Optional[int] = None, keep_days: Optional[int] = None) -> "Sandbox":
         """Create a new sandbox.
 
         template  what is preinstalled ("base", "code-interpreter", "browser", "node", ...)
@@ -213,6 +433,9 @@ class Sandbox:
                   sleep instead: files are kept (several days), running programs stop, and the next
                   command wakes it up in a few seconds
         idle_timeout  with on_timeout="pause": fall asleep after this many seconds without commands
+        keep_days  with on_timeout="pause": keep the sandbox this many days after it falls asleep
+                  before it is deleted (default: your plan's retention; the plan sets the maximum).
+                  Change it later with keep(); disk of a sleeping sandbox is billed.
         Network settings can only make your team's policy stricter, never looser.
         """
         c = Client(url, api_key)
@@ -242,6 +465,8 @@ class Sandbox:
             body["on_timeout"] = on_timeout
         if idle_timeout:
             body["idle_timeout_s"] = int(idle_timeout)
+        if keep_days:
+            body["keep_days"] = int(keep_days)
         d = c.request("POST", "/v1/sandboxes", body=body)
         return cls._from(d, c)
 
@@ -269,6 +494,11 @@ class Sandbox:
     @property
     def files(self) -> Files:
         return Files(self)
+
+    @property
+    def computer(self) -> Computer:
+        """The graphical desktop (template "desktop", beta): screenshots, mouse and keyboard."""
+        return Computer(self)
 
     def kill(self) -> None:
         """Destroy the sandbox with its disk and memory (no error if it is already gone)."""
@@ -300,9 +530,46 @@ class Sandbox:
         Any later command (or resume()) wakes it up in a few seconds."""
         self.state = self._c.request("POST", f"/v1/sandboxes/{self.id}/sleep")["state"]
 
+    def keep(self, days: int) -> dict:
+        """Keep the sandbox `days` days after it falls asleep before it is deleted with its files
+        (0 = your plan's default; the plan sets the maximum). Returns keep_days,
+        default_keep_days, max_keep_days and, for a sleeping sandbox, delete_at."""
+        return self._c.request("PUT", f"/v1/sandboxes/{self.id}/keep", body={"keep_days": int(days)})
+
     def resume(self) -> None:
         """Continue a paused sandbox exactly where it stopped, or wake up a sleeping one."""
         self.state = self._c.request("POST", f"/v1/sandboxes/{self.id}/resume")["state"]
+
+    # ------------------------------------------------------------ metrics (measured by the host)
+
+    def metrics_history(self, since: Union[None, int, datetime] = None) -> dict:
+        """CPU, memory, network and disk of the sandbox over the last hour, measured by the host
+        every 10 seconds: {"source": "host", "interval_s": 10, "retention_s": 3600, "vcpu", "mem_mb",
+        "state", "samples": [{"t": unix_ms, "cpu_pct", "cpu_ms", "mem_mb", "net_rx_bytes", ...}]}.
+
+        since  only samples newer than this (Unix milliseconds or a datetime) – poll with the
+               "t" of the last sample you have
+        Does not wake a sleeping sandbox (it returns its state and no samples) and does not count
+        as activity. History starts again after the sandbox wakes up. Requires the
+        metrics_history feature (see features()).
+        """
+        q = {"since": _unix_ms(since)} if since is not None else None
+        return self._c.request("GET", f"/v1/sandboxes/{self.id}/metrics/history", query=q)
+
+    def metrics_stream(self, since: Union[None, int, datetime] = None, timeout: float = 16 * 60) -> Iterator[dict]:
+        """Live metrics (Server-Sent Events) as a generator of {"event": ..., "data": {...}}:
+        "state" first (the sandbox state), then a "sample" every 10 s (same fields as in
+        metrics_history), finally "end" ({"reason": "timeout" | "not_running" | "ended"}).
+        The server closes the stream after 15 minutes – open a new one to continue. A sleeping
+        sandbox is not woken up: you get its state and "end" right away.
+
+        since  also send already measured samples newer than this (Unix ms or a datetime);
+               since=0 sends the whole stored history first. Without it only new samples come.
+        """
+        q = {"since": _unix_ms(since)} if since is not None else None
+        resp = self._c.request("GET", f"/v1/sandboxes/{self.id}/metrics/stream", query=q, timeout=timeout, stream=True)
+        with resp:
+            yield from _sse_events(resp)
 
     def __enter__(self) -> "Sandbox":
         return self
@@ -800,6 +1067,45 @@ def set_default_compute_class(name: str, url: Optional[str] = None, api_key: Opt
     """Set your account's default compute class ("" = global default). Applies only to new sandboxes and
     jobs; running ones keep their class and price. A class you are not allowed to use is refused."""
     return Client(url, api_key).request("PUT", "/v1/compute/preferences", body={"default_compute_class": name})
+
+
+def features(url: Optional[str] = None, api_key: Optional[str] = None) -> Dict[str, bool]:
+    """Which optional features your account has enabled, e.g. {"metrics_history": True, "desktop": False}.
+    The server always decides; a disabled feature answers HTTP 403 with code "feature_disabled"."""
+    return Client(url, api_key).request("GET", "/v1/features").get("features", {})
+
+
+def _unix_ms(t: Union[int, float, datetime]) -> int:
+    """Unix milliseconds from an int/float (already ms) or a datetime (naive = UTC)."""
+    if isinstance(t, datetime):
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+        return int(t.timestamp() * 1000)
+    return int(t)
+
+
+def _sse_events(lines) -> Iterator[dict]:
+    """Parse Server-Sent Events from an iterable of byte lines; stops after the "end" event."""
+    event, data = "message", []
+    for raw in lines:
+        line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+        if line == "":
+            if data:
+                text = "\n".join(data)
+                try:
+                    payload = json.loads(text)
+                except ValueError:
+                    payload = text
+                yield {"event": event, "data": payload}
+                if event == "end":
+                    return
+            event, data = "message", []
+        elif line.startswith(":"):
+            continue  # keep-alive comment (": ping")
+        elif line.startswith("event:"):
+            event = line[6:].strip()
+        elif line.startswith("data:"):
+            data.append(line[5:].lstrip(" "))
 
 
 def runtimes(url: Optional[str] = None, api_key: Optional[str] = None) -> dict:

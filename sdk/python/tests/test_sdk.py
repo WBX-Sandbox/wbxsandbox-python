@@ -169,6 +169,21 @@ class IPVersionTest(unittest.TestCase):
         self.assertEqual(wbxsandbox.job_body("echo", ip="dual")["network"], {"ip": "dual"})
 
 
+class KeepDaysTest(unittest.TestCase):
+    def test_create_and_keep(self):
+        with mock.patch.object(wbxsandbox.Client, "request", return_value={"id": "sb_n_1"}) as req:
+            sb = wbxsandbox.Sandbox.create(on_timeout="pause", keep_days=30, url="http://x", api_key="k")
+        self.assertEqual(req.call_args.kwargs["body"]["keep_days"], 30)
+        with mock.patch.object(wbxsandbox.Client, "request", return_value={"id": "sb_n_2"}) as req:
+            wbxsandbox.Sandbox.create(url="http://x", api_key="k")
+        self.assertNotIn("keep_days", req.call_args.kwargs["body"])
+        out = {"id": "sb_n_1", "keep_days": 60, "max_keep_days": 60, "default_keep_days": 14}
+        with mock.patch.object(wbxsandbox.Client, "request", return_value=out) as req:
+            self.assertEqual(sb.keep(60), out)
+        self.assertEqual(req.call_args.args, ("PUT", "/v1/sandboxes/sb_n_1/keep"))
+        self.assertEqual(req.call_args.kwargs["body"], {"keep_days": 60})
+
+
 class VerifyReceiptTest(unittest.TestCase):
     """Ověření podepsané účtenky (Ed25519) – bez sítě, s dočasným testovacím klíčem."""
 
