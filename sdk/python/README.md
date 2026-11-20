@@ -4,6 +4,19 @@ Python SDK for [WBX Sandbox](https://sandbox.wbx.cz): isolated cloud sandboxes f
 and code execution. Each sandbox is a Firecracker microVM with its own Linux kernel, disk and
 network rules. No dependencies – only the Python standard library (Python 3.9+).
 
+What it covers:
+
+- **Sandboxes** – commands (also streamed), code in Python, Node.js or bash, files, public HTTPS
+  URLs of ports, network rules and IPv6, pause, sleep and wake with named sandboxes
+- **Background jobs and batches** – no open connection, result files with SHA-256 checks, price
+  limits and budgets, log digests for LLMs, webhooks, WebAssembly jobs
+- **Signed execution receipts** – verify what ran, on which template build, with which inputs
+- **Metrics** – CPU, memory, network and disk measured by the host, history and live stream
+- **Desktop & Computer Use** (beta, enabled on request) – screenshots, mouse and keyboard
+- **`wbx connect`** – an interactive shell in a running sandbox
+
+Full reference: https://sandbox.wbx.cz/docs/sdk
+
 ## Install
 
     pip install wbxsandbox
