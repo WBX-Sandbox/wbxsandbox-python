@@ -12,6 +12,8 @@ What it covers:
   limits and budgets, log digests for LLMs, webhooks, WebAssembly jobs
 - **Signed execution receipts** – verify what ran, on which template build, with which inputs
 - **Metrics** – CPU, memory, network and disk measured by the host, history and live stream
+- **Snapshots and clones** – save a sandbox disk, start new sandboxes from it, or make up to
+  10 copies of a sandbox in one call; copies keep the source's lifetime and network settings
 - **Desktop & Computer Use** (beta, enabled on request) – screenshots, mouse and keyboard
 - **`wbx connect`** – an interactive shell in a running sandbox
 
@@ -99,7 +101,7 @@ Metrics – CPU, memory, network and disk of a running sandbox, measured by the 
 ```python
 from wbxsandbox import Sandbox, features
 
-print(features())                         # {"metrics_history": True, "desktop": False}
+print(features())                         # {"metrics_history": True, "desktop": False, "snapshots": True, "clones": True}
 sb = Sandbox.connect("sb_...")            # a running sandbox
 h = sb.metrics_history()                  # {"state", "interval_s", "samples": [{"t", "cpu_pct", "mem_mb", ...}]}
 for ev in sb.metrics_stream(since=0):     # since=0: the stored hour first, then live samples
@@ -111,6 +113,9 @@ for ev in sb.metrics_stream(since=0):     # since=0: the stored hour first, then
 
 Neither call wakes a sleeping sandbox. A feature that is not enabled for your account raises
 `SandboxError` with status 403 and code `feature_disabled`.
+
+Snapshots and clones – save a sandbox disk and start copies of it; see
+[Snapshots and clones](#snapshots-and-clones) below.
 
 Desktop control (template `desktop`, feature `desktop` – beta, enabled on request):
 
@@ -155,7 +160,7 @@ except SandboxError as e:
 |---|---|
 | `status` | HTTP status; `0` = the server could not be reached (or the SDK found the error itself) |
 | `message` | human-readable message |
-| `code` | machine-readable code from the error body (`quota`, `queue_full`, `feature_disabled`, `human_in_control`, …) or `None` |
+| `code` | machine-readable code from the error body (`quota`, `queue_full`, `feature_disabled`, `human_in_control`, `snapshot_limit`, …) or `None` |
 | `retry_after` | seconds from the `Retry-After` header (some 429 and 503 responses) or `None` |
 | `body` | the parsed JSON error body (`dict`), the raw text, or `None` |
 
@@ -168,10 +173,90 @@ Timeouts: the SDK waits up to 120 s for an answer unless the call sets its own l
 Documentation: https://sandbox.wbx.cz/docs · TypeScript SDK: `npm install wbxsandbox`
 (https://sandbox.wbx.cz/docs/sdk/typescript) · Pricing: https://sandbox.wbx.cz/pricing
 
+## Snapshots and clones
+
+A **snapshot** is a copy of a sandbox disk: installed packages, your files and everything else
+written to the disk (also `.env` files or shell history) – no memory, no running programs and no
+environment variables passed with `env`. It belongs to your account only, stays until you
+delete it (also after the source sandbox ends) and its size is billed as storage, like a
+sleeping sandbox. A **clone** is a snapshot plus 1–10 new sandboxes started from it in one call.
+
+Snapshots and clones are available on every plan (features `snapshots` and `clones`, shown by
+`features()`). If they have been turned off for your account, the calls raise `SandboxError`
+403 with code `feature_disabled`.
+
+```python
+from wbxsandbox import Sandbox, Snapshot
+
+sb = Sandbox.create(template="base", timeout=1800, on_timeout="pause")
+sb.run("pip install pandas").check()
+
+# snapshot of a running, paused or sleeping sandbox (a running one keeps running)
+snap = sb.snapshot(name="after-setup")          # Snapshot(id="snap_...", size_bytes=..., ...)
+
+# a new sandbox from the snapshot: settings come from this call, not from the snapshot
+sb2 = Sandbox.create(from_snapshot=snap.id, timeout=600, env={"TOKEN": "..."})
+# or: snap.create_sandbox(timeout=600)
+
+for s in Snapshot.list():
+    print(s.id, s.name, s.source_sandbox, s.size_bytes, s.created_at)
+Snapshot.get("snap_...").delete()               # or snap.delete()
+```
+
+Clone – the copies keep the source's lifetime and network settings unless you pass them:
+
+```python
+copies = sb.clone(count=3)                      # 30 minutes, sleep after it – as sb
+print([c.id for c in copies], copies.errors)    # errors: copies that could not be created
+                                                # ({"index", "name", "status", "code", "error"})
+one = sb.clone(timeout=3600, name="long-run")   # own lifetime, the rest as sb
+safe = sb.clone(count=2, internet=False)        # network can only be narrowed
+kept = sb.clone(count=2, keep_snapshot=True, snapshot_name="base-env")
+print(kept.snapshot_id, kept.snapshot_kept)     # the snapshot stays and can start more sandboxes
+```
+
+What a copy takes from the source sandbox when the argument is left out:
+
+| argument | without it |
+|---|---|
+| `timeout` | the source's lifetime (as created, or as last set with `set_timeout()`) |
+| `on_timeout`, `idle_timeout` | the source's (sleep or destroy after the lifetime; inactivity limit with `"pause"`) |
+| `keep_days` | the source's, at most what your plan allows |
+| `compute_class` | the source's class (your account's default class if you can no longer use the source's) |
+| `internet`, `allow`, `block`, `ip` | the source's network access and IP version. Passed values can only narrow it: the stricter mode wins, blocked destinations add up, two allowlists give only destinations allowed by both; `ip="ipv4"` gives copies of an IPv6 source no IPv6 |
+| `env`, `metadata` | not taken over – pass what the copies need |
+
+A zero or empty value counts as left out: `timeout=0`, `keep_days=0`, `idle_timeout=0` and
+`compute_class=""` keep the source's setting – pass the value you want instead.
+
+`name` names the copies (`<name>-1` … `<name>-N` for several). A sandbox started with
+`from_snapshot` takes nothing from the source sandbox – only the files of the snapshot.
+
+Every copy and every sandbox from a snapshot gets a new ID, its own IP addresses and a new
+identity (new machine-id, no SSH host keys of the source); it restarts once during its first
+start, so starting it takes a few seconds longer. Copies start on the server that holds the
+snapshot and count towards your concurrent-sandbox, vCPU and memory limits.
+
+Limits and errors:
+
+- Number of snapshots: set by your plan (by default Free 3, Solo 10, Pro 50, Team 200) –
+  `SandboxError` 429, code `snapshot_limit`. Copies made by a clone do not keep a snapshot
+  unless `keep_snapshot=True`.
+- An archived sandbox must be woken up first – 409, code `sandbox_archived`.
+- `clone()` returns the copies that were created and lists the others in `.errors`; it raises
+  `SandboxError` only when no copy could be created.
+- 503 `snapshot_node_unavailable`: the server with the snapshot is full or not responding;
+  503 `clone_network_unknown`: the network settings of the source cannot be read right now –
+  retry shortly.
+- The SDK waits up to 630 s for a snapshot, 300 s for a sandbox from a snapshot and 930 s for
+  a clone.
+
+Details: https://sandbox.wbx.cz/docs/sandboxes/snapshots
+
 ## Versioning
 
 The SDK has its own version. Its `major.minor` follows the platform release line
-(SDK 0.15.x works with platform 0.15.x); the patch number is raised only when the SDK
+(SDK 0.16.x works with platform 0.16.x); the patch number is raised only when the SDK
 itself changes. `pyproject.toml` and `wbxsandbox.__version__` always carry the same
 version (checked by `tests/test_sdk.py`).
 

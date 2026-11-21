@@ -34,6 +34,12 @@ Batches (fan-out) – many jobs, a concurrency limit and a total price limit:
     print(batch.summary()["status"])   # completed / partial / failed
     rows = batch.report()["jobs"]      # one row per job
 
+Snapshots and clones (features "snapshots" and "clones"):
+
+    snap = sb.snapshot(name="after-setup")          # copy of the disk
+    sb2 = Sandbox.create(from_snapshot=snap.id)     # new sandbox with those files
+    copies = sb.clone(count=3)                      # three copies (same lifetime and network as sb)
+
 WebAssembly jobs (runtime="wasi", no network, fast start):
 
     job = run_job(wasm_module=open("tool.wasm", "rb").read(), wasm_args=["--fast"],
@@ -57,11 +63,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable, Dict, Iterator, List, Optional, Union
 
-__version__ = "0.15.10"
+__version__ = "0.16.1"
 __all__ = ["Sandbox", "CommandResult", "SandboxError", "ComputerActionError", "Client", "Computer", "Screenshot", "Job", "run_job", "get_job", "list_jobs",
            "Batch", "run_batch", "get_batch", "list_batches", "job_input", "batch_input", "get_budget", "set_budget", "runtimes",
            "compute_preferences", "set_default_compute_class", "wait_jobs", "webhook_secret", "verify_webhook",
-           "receipt_keys", "verify_receipt", "features"]
+           "receipt_keys", "verify_receipt", "features", "Snapshot", "CloneList"]
 
 
 class SandboxError(Exception):
@@ -71,7 +77,7 @@ class SandboxError(Exception):
                  (the server could not be reached, or the SDK found the error itself)
     message      human-readable message ("error" of the JSON body, or the raw text)
     code         machine-readable code from the JSON body ("quota", "queue_full",
-                 "feature_disabled", "human_in_control", ...) or None
+                 "feature_disabled", "human_in_control", "snapshot_limit", "sandbox_archived", ...) or None
     retry_after  seconds the server asked to wait before retrying (Retry-After header,
                  seconds or an HTTP date), or None – sent with some 429 and 503 responses
     body         the parsed JSON error body (dict), the raw text when it was not JSON, or None
@@ -391,6 +397,39 @@ class Computer:
         return self._one({"type": "key", "keys": keys})
 
 
+def _create_body(timeout, metadata, vcpu, mem_mb, internet, allow, block, env, compute_class, placement,
+                 dependency_cache, optimize_for, ip, name, on_timeout, idle_timeout, keep_days) -> dict:
+    """Body of POST /v1/sandboxes (and of a clone) without the template."""
+    body = {"timeout_s": timeout, "metadata": metadata or {}, "vcpu": vcpu, "mem_mb": mem_mb}
+    if env:
+        body["env"] = dict(env)
+    if compute_class:
+        body["compute_class"] = compute_class
+    if placement:
+        body["placement"] = placement
+    if optimize_for:
+        body["optimize_for"] = optimize_for
+    if dependency_cache is not None:
+        body["dependency_cache"] = bool(dependency_cache)
+    if not internet:
+        body["network"] = {"mode": "none"}
+    elif allow:
+        body["network"] = {"mode": "allowlist", "allow": list(allow), "block": list(block or [])}
+    elif block:
+        body["network"] = {"mode": "full", "block": list(block)}
+    if ip:
+        body.setdefault("network", {})["ip"] = ip
+    if name:
+        body["name"] = name
+    if on_timeout:
+        body["on_timeout"] = on_timeout
+    if idle_timeout:
+        body["idle_timeout_s"] = int(idle_timeout)
+    if keep_days:
+        body["keep_days"] = int(keep_days)
+    return body
+
+
 @dataclass
 class Sandbox:
     id: str
@@ -402,17 +441,22 @@ class Sandbox:
     # ------------------------------------------------------------ lifecycle
 
     @classmethod
-    def create(cls, template: str = "base", timeout: int = 300, metadata: Optional[Dict[str, str]] = None,
+    def create(cls, template: Optional[str] = None, timeout: int = 300, metadata: Optional[Dict[str, str]] = None,
                vcpu: int = 0, mem_mb: int = 0, url: Optional[str] = None, api_key: Optional[str] = None,
                internet: bool = True, allow: Optional[List[str]] = None, block: Optional[List[str]] = None,
                env: Optional[Dict[str, str]] = None, compute_class: Optional[str] = None,
                placement: Optional[str] = None, dependency_cache: Optional[bool] = None,
                optimize_for: Optional[str] = None, ip: Optional[str] = None,
                name: Optional[str] = None, on_timeout: Optional[str] = None,
-               idle_timeout: Optional[int] = None, keep_days: Optional[int] = None) -> "Sandbox":
+               idle_timeout: Optional[int] = None, keep_days: Optional[int] = None,
+               from_snapshot: Optional[str] = None) -> "Sandbox":
         """Create a new sandbox.
 
-        template  what is preinstalled ("base", "code-interpreter", "browser", "node", ...)
+        template  what is preinstalled ("base" when omitted, "code-interpreter", "browser", "node", ...)
+        from_snapshot  start from the disk of one of your snapshots ("snap_..." or a Snapshot) instead
+                  of a fresh template disk; the sandbox gets the snapshot's template, a new ID and
+                  network, and env / settings from this call (snapshots never contain env).
+                  Requires the snapshots feature (see features()).
         timeout   lifetime in seconds; extend it any time with set_timeout()
         metadata  your own labels, returned when you list sandboxes
         env       environment variables for every command in the sandbox (e.g. API keys)
@@ -439,35 +483,17 @@ class Sandbox:
         Network settings can only make your team's policy stricter, never looser.
         """
         c = Client(url, api_key)
-        body = {"template": template, "timeout_s": timeout, "metadata": metadata or {},
-                "vcpu": vcpu, "mem_mb": mem_mb}
-        if env:
-            body["env"] = dict(env)
-        if compute_class:
-            body["compute_class"] = compute_class
-        if placement:
-            body["placement"] = placement
-        if optimize_for:
-            body["optimize_for"] = optimize_for
-        if dependency_cache is not None:
-            body["dependency_cache"] = bool(dependency_cache)
-        if not internet:
-            body["network"] = {"mode": "none"}
-        elif allow:
-            body["network"] = {"mode": "allowlist", "allow": list(allow), "block": list(block or [])}
-        elif block:
-            body["network"] = {"mode": "full", "block": list(block)}
-        if ip:
-            body.setdefault("network", {})["ip"] = ip
-        if name:
-            body["name"] = name
-        if on_timeout:
-            body["on_timeout"] = on_timeout
-        if idle_timeout:
-            body["idle_timeout_s"] = int(idle_timeout)
-        if keep_days:
-            body["keep_days"] = int(keep_days)
-        d = c.request("POST", "/v1/sandboxes", body=body)
+        body = _create_body(timeout, metadata, vcpu, mem_mb, internet, allow, block, env, compute_class, placement,
+                            dependency_cache, optimize_for, ip, name, on_timeout, idle_timeout, keep_days)
+        if from_snapshot:
+            body["from_snapshot"] = from_snapshot.id if isinstance(from_snapshot, Snapshot) else str(from_snapshot)
+            if template:
+                body["template"] = template
+        else:
+            body["template"] = template or "base"
+        # ze snapshotu se kopíruje disk (bez reflinku celý) – delší limit než běžný požadavek
+        d = c.request("POST", "/v1/sandboxes", body=body,
+                      timeout=max(_FROM_SNAPSHOT_TIMEOUT, c.timeout) if from_snapshot else None)
         return cls._from(d, c)
 
     @property
@@ -539,6 +565,74 @@ class Sandbox:
     def resume(self) -> None:
         """Continue a paused sandbox exactly where it stopped, or wake up a sleeping one."""
         self.state = self._c.request("POST", f"/v1/sandboxes/{self.id}/resume")["state"]
+
+    # ------------------------------------------------------------ snapshots and clones (feature "snapshots")
+
+    def snapshot(self, name: Optional[str] = None) -> "Snapshot":
+        """Save a copy of the sandbox disk as a snapshot (running, paused or sleeping sandbox).
+
+        A snapshot holds the files only – no memory and no running programs. A running sandbox
+        is paused only for a moment and keeps running. An archived sandbox must be woken up first
+        (409 sandbox_archived). Start new sandboxes from it with Snapshot.create_sandbox() or
+        Sandbox.create(from_snapshot=...). Snapshots are kept until you delete them; their size is
+        billed as storage. Requires the snapshots feature; the number of snapshots is limited by
+        your plan (429 snapshot_limit).
+        """
+        body = {"name": name} if name else {}
+        d = self._c.request("POST", f"/v1/sandboxes/{self.id}/snapshots", body=body, timeout=_SNAPSHOT_TIMEOUT)
+        return Snapshot._from(d, self._c)
+
+    def clone(self, count: int = 1, name: Optional[str] = None, keep_snapshot: bool = False,
+              timeout: Optional[int] = None, metadata: Optional[Dict[str, str]] = None, vcpu: int = 0, mem_mb: int = 0,
+              internet: bool = True, allow: Optional[List[str]] = None, block: Optional[List[str]] = None,
+              env: Optional[Dict[str, str]] = None, compute_class: Optional[str] = None,
+              placement: Optional[str] = None, dependency_cache: Optional[bool] = None,
+              optimize_for: Optional[str] = None, ip: Optional[str] = None, on_timeout: Optional[str] = None,
+              idle_timeout: Optional[int] = None, keep_days: Optional[int] = None,
+              snapshot_name: Optional[str] = None) -> "CloneList":
+        """Create `count` (1–10) new sandboxes with a copy of this sandbox's disk.
+
+        Takes a snapshot of the disk and starts the copies from it on the same server; the
+        snapshot is deleted afterwards unless keep_snapshot=True (snapshot_name names it – same
+        rules as name). name names the copies (<name>-1 … <name>-N for several). Each copy has its own ID,
+        IP addresses and identity (new machine-id, no SSH host keys of the source). Memory and
+        running programs are not copied – start what you need again.
+
+        Copies keep the source sandbox's lifetime and network settings unless you pass them: without
+        timeout, on_timeout, idle_timeout, keep_days or compute_class the copies get the source's
+        values, and its network access (no internet, allowed destinations, IP version). Network
+        options passed here can only narrow the source's access, never widen it. env and metadata
+        are not inherited (pass what the copies need); vCPU and memory come from the snapshot
+        unless you pass vcpu / mem_mb.
+
+        Returns a list of the new sandboxes. When only some copies could be created, the list
+        holds those and .errors the reasons (one dict per failed copy: index, name, status, code,
+        error); .snapshot_kept tells whether the snapshot was kept. When none could be created,
+        SandboxError is raised. Requires the snapshots and clones features; the copies
+        count towards your concurrent-sandbox limits.
+        """
+        if not 1 <= int(count) <= 10:
+            raise ValueError("count must be between 1 and 10")
+        body = _create_body(timeout, metadata, vcpu, mem_mb, internet, allow, block, env, compute_class, placement,
+                            dependency_cache, optimize_for, ip, name, on_timeout, idle_timeout, keep_days)
+        if timeout is None:
+            body.pop("timeout_s")
+        body["count"] = int(count)
+        if keep_snapshot:
+            body["keep_snapshot"] = True
+        if snapshot_name:
+            body["snapshot_name"] = snapshot_name
+        d = self._c.request("POST", f"/v1/sandboxes/{self.id}/clone", body=body,
+                            timeout=_CLONE_TIMEOUT)
+        d = d if isinstance(d, dict) else {}
+        out = CloneList((Sandbox._from(x, self._c) for x in d.get("sandboxes") or []),
+                        snapshot_id=d.get("snapshot_id"), errors=d.get("errors"),
+                        snapshot_kept=bool(d.get("snapshot_kept", keep_snapshot)))
+        if not out and out.errors:
+            e = out.errors[0] if isinstance(out.errors[0], dict) else {"error": str(out.errors[0])}
+            raise SandboxError(int(e.get("status") or 0), str(e.get("error") or "no copy could be created"),
+                               code=e.get("code"), body=d)
+        return out
 
     # ------------------------------------------------------------ metrics (measured by the host)
 
@@ -636,6 +730,94 @@ class Sandbox:
         path = f"/tmp/_wbx_code_{uuid.uuid4().hex}{ext}"
         self.files.write(path, code)
         return self.run(f"{interp} {path}; rc=$?; rm -f {path}; exit $rc", timeout=timeout)
+
+
+# --------------------------------------------------------------------------- snapshots
+
+# kopie disku bez reflinku může trvat déle než běžný požadavek
+_SNAPSHOT_TIMEOUT = 630
+# nový sandbox ze snapshotu (kopie disku snapshotu; jako portál)
+_FROM_SNAPSHOT_TIMEOUT = 300
+# klon: snapshot (server ≤ ~620 s) + souběžné kopie ze snapshotu (≤ ~230 s) + úklid ≈ 910 s
+_CLONE_TIMEOUT = 930
+
+
+class CloneList(list):
+    """Result of Sandbox.clone(): a list of the new sandboxes.
+
+    snapshot_id    the snapshot the copies were started from
+    snapshot_kept  True when the snapshot was kept (keep_snapshot=True); otherwise it was deleted
+    errors         one dict per copy that could not be created: {"index", "name", "status", "code", "error"}
+                   (index = position of the copy 0..count-1, name = its name or "")
+    """
+
+    def __init__(self, items=(), snapshot_id: Optional[str] = None, errors: Optional[List[dict]] = None,
+                 snapshot_kept: bool = False):
+        super().__init__(items)
+        self.snapshot_id = snapshot_id
+        self.snapshot_kept = snapshot_kept
+        self.errors = list(errors or [])
+
+
+@dataclass
+class Snapshot:
+    """A saved copy of a sandbox disk (files only – no memory, no running programs, no env).
+
+        snap = sb.snapshot(name="after-setup")
+        sb2 = snap.create_sandbox(timeout=600)       # or Sandbox.create(from_snapshot=snap.id)
+        Snapshot.list(); Snapshot.get("snap_..."); snap.delete()
+
+    A snapshot belongs to your account only and stays until you delete it (deleting the source
+    sandbox does not delete it). Its size_bytes is billed as storage, like sleeping sandboxes.
+    """
+
+    id: str
+    name: str = ""
+    source_sandbox: str = ""
+    template: str = ""
+    vcpu: int = 0
+    mem_mb: int = 0
+    disk_mb: int = 0
+    size_bytes: int = 0
+    created_at: str = ""
+    info: Dict = field(default_factory=dict)   # the whole API record
+    _c: Client = field(default=None, repr=False)
+
+    @classmethod
+    def _from(cls, d: dict, c: Client) -> "Snapshot":
+        d = d or {}
+        return cls(id=d.get("id", ""), name=d.get("name") or "", source_sandbox=d.get("source_sandbox") or "",
+                   template=d.get("template") or "", vcpu=int(d.get("vcpu") or 0), mem_mb=int(d.get("mem_mb") or 0),
+                   disk_mb=int(d.get("disk_mb") or 0), size_bytes=int(d.get("size_bytes") or 0),
+                   created_at=d.get("created_at") or "", info=dict(d), _c=c)
+
+    @classmethod
+    def list(cls, url: Optional[str] = None, api_key: Optional[str] = None) -> List["Snapshot"]:
+        """Your snapshots."""
+        c = Client(url, api_key)
+        d = c.request("GET", "/v1/snapshots")
+        rows = d.get("snapshots") if isinstance(d, dict) else d
+        return [cls._from(x, c) for x in rows or []]
+
+    @classmethod
+    def get(cls, snapshot_id: str, url: Optional[str] = None, api_key: Optional[str] = None) -> "Snapshot":
+        """One snapshot by its ID (404 when it does not exist or is not yours)."""
+        c = Client(url, api_key)
+        return cls._from(c.request("GET", f"/v1/snapshots/{urllib.parse.quote(snapshot_id, safe='')}"), c)
+
+    def delete(self) -> None:
+        """Delete the snapshot (no error if it is already gone). Sandboxes created from it are not affected."""
+        try:
+            self._c.request("DELETE", f"/v1/snapshots/{urllib.parse.quote(self.id, safe='')}")
+        except SandboxError as e:
+            if e.status != 404:
+                raise
+
+    def create_sandbox(self, **kw) -> "Sandbox":
+        """Start a new sandbox from this snapshot; takes the arguments of Sandbox.create()."""
+        kw.setdefault("url", self._c.url)
+        kw.setdefault("api_key", self._c.api_key)
+        return Sandbox.create(from_snapshot=self.id, **kw)
 
 
 # --------------------------------------------------------------------------- background jobs

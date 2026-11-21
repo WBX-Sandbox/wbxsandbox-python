@@ -33,6 +33,7 @@ print(job.wait().summary()["status"])                  # runs without an open co
 | **Commands and code** | `run()` with exit code and output, live output callbacks, `stream()` events, `run_code()` for Python, Node.js and bash | [Commands](https://sandbox.wbx.cz/docs/sandboxes/commands) |
 | **Files** | Write, read, list, create directories, remove | [Files](https://sandbox.wbx.cz/docs/sandboxes/files) |
 | **Sleep and wake** | Named sandboxes that fall asleep with their files (`on_timeout="pause"`, `sleep()`, `keep(days)`) and wake on the next request | [Sleep and wake](https://sandbox.wbx.cz/docs/sandboxes/sleep) |
+| **Snapshots and clones** | `sb.snapshot()` saves the disk; `Sandbox.create(from_snapshot=…)` and `sb.clone(count)` start new sandboxes from it – each copy gets its own ID, network and machine identity and keeps the source's lifetime and network settings | [Snapshots & clones](https://sandbox.wbx.cz/docs/sandboxes/snapshots) |
 | **Network and IPv6** | No network, an allowlist, blocked destinations; a public IPv6 address per sandbox (`ip="dual"`) | [Network](https://sandbox.wbx.cz/docs/sandboxes/network) |
 | **Public URLs** | HTTPS address with an access token for any port (`get_url(port)`) | [Public URLs](https://sandbox.wbx.cz/docs/sandboxes/urls) |
 | **Background jobs** | `run_job()` with result files, price limit, retries, idempotency; `wait()`, LLM-friendly log digest and test results, SHA-256-checked downloads, files passed between jobs | [Jobs](https://sandbox.wbx.cz/docs/jobs) |
