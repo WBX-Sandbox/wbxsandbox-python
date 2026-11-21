@@ -3,7 +3,7 @@
 Changes of the Python SDK from 0.16.0 on (earlier versions are listed in the platform
 changelog). The SDK has its own patch numbers; `major.minor` follows the platform release line.
 
-## [0.16.1] – unreleased
+## [0.16.1] – 2026-11-21
 
 ### Changed
 
@@ -19,7 +19,7 @@ changelog). The SDK has its own patch numbers; `major.minor` follows the platfor
 
 - README: section on snapshots and clones (examples, what copies inherit, limits, errors).
 
-## [0.16.0] – unreleased
+## [0.16.0] – 2026-11-21
 
 ### Added
 
