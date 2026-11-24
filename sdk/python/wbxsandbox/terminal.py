@@ -291,10 +291,16 @@ class _RawInput:
 def connect(sandbox_id: str, url: Optional[str] = None, api_key: Optional[str] = None,
             out: Callable[[str], None] = None) -> int:
     """Open an interactive shell in the sandbox. Returns the shell's exit code (or 1)."""
-    url = (url or os.environ.get("WBXSANDBOX_URL", "https://sandbox.wbx.cz")).rstrip("/")
+    from . import SandboxError, check_url
+    try:
+        # wss jen přes https (http jen pro localhost / WBXSANDBOX_ALLOW_INSECURE) – klíč nikdy nešifrovaně
+        url = check_url((url or os.environ.get("WBXSANDBOX_URL", "https://sandbox.wbx.cz")).rstrip("/"))
+    except SandboxError as e:
+        sys.stderr.write(f"{e.message}\n")
+        return 2
     api_key = api_key or os.environ.get("WBXSANDBOX_API_KEY", "")
     if not api_key:
-        sys.stderr.write("Set WBXSANDBOX_API_KEY (or pass --key).\n")
+        sys.stderr.write("Set WBXSANDBOX_API_KEY (or use --key-file).\n")
         return 2
     write = out or (lambda s: (sys.stdout.write(s), sys.stdout.flush()))
     cols, rows = _size()

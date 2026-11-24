@@ -52,8 +52,10 @@ Configuration (environment variables, or url= / api_key= arguments):
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import random
 import time
 import urllib.error
 import urllib.parse
@@ -63,7 +65,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable, Dict, Iterator, List, Optional, Union
 
-__version__ = "0.16.1"
+__version__ = "0.17.0"
 __all__ = ["Sandbox", "CommandResult", "SandboxError", "ComputerActionError", "Client", "Computer", "Screenshot", "Job", "run_job", "get_job", "list_jobs",
            "Batch", "run_batch", "get_batch", "list_batches", "job_input", "batch_input", "get_budget", "set_budget", "runtimes",
            "compute_preferences", "set_default_compute_class", "wait_jobs", "webhook_secret", "verify_webhook",
@@ -160,13 +162,53 @@ class CommandResult:
         return self
 
 
-class Client:
-    """Low-level HTTP client for the WBX Sandbox REST API."""
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Redirects are not followed: urllib would copy the X-API-Key header to the new address."""
 
-    def __init__(self, url: Optional[str] = None, api_key: Optional[str] = None, timeout: float = 120):
-        self.url = (url or os.environ.get("WBXSANDBOX_URL", "https://sandbox.wbx.cz")).rstrip("/")
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise SandboxError(0, f"the server answered with a redirect to {newurl} – redirects are not followed so the "
+                              "API key is never sent to another address; set the API address to the final one")
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect())
+
+
+def _urlopen(req: urllib.request.Request, timeout: float):
+    return _OPENER.open(req, timeout=timeout)
+
+
+def check_url(url: str, allow_insecure: bool = False) -> str:
+    """The API address: https, or plain http only for localhost (or with allow_insecure /
+    WBXSANDBOX_ALLOW_INSECURE=1) – over http the API key would travel unencrypted."""
+    u = urllib.parse.urlsplit(url)
+    if u.scheme == "https" and u.hostname:
+        return url
+    local = u.hostname in ("localhost", "127.0.0.1", "::1")
+    insecure = allow_insecure or os.environ.get("WBXSANDBOX_ALLOW_INSECURE", "") in ("1", "true", "yes")
+    if u.scheme == "http" and u.hostname and (local or insecure):
+        return url
+    raise SandboxError(0, f"refusing to use {url!r}: the API key would be sent unencrypted – use an https:// address "
+                          "(or allow_insecure=True / WBXSANDBOX_ALLOW_INSECURE=1 for a trusted network)")
+
+
+_RETRY_STATUS = (502, 503, 504)
+
+
+class Client:
+    """Low-level HTTP client for the WBX Sandbox REST API.
+
+    Safe requests (GET, HEAD, DELETE, PUT and POST with an idempotency_key) are retried up to
+    max_retries times after a connection error, 502/503/504 or 429 with Retry-After."""
+
+    def __init__(self, url: Optional[str] = None, api_key: Optional[str] = None, timeout: float = 120,
+                 max_retries: int = 2, allow_insecure: bool = False):
+        self.url = check_url((url or os.environ.get("WBXSANDBOX_URL", "https://sandbox.wbx.cz")).rstrip("/"), allow_insecure)
         self.api_key = api_key or os.environ.get("WBXSANDBOX_API_KEY", "")
         self.timeout = timeout
+        self.max_retries = max_retries
+
+    def __repr__(self) -> str:
+        return f"<Client {self.url} key={'set' if self.api_key else 'missing'}>"
 
     def request(self, method: str, path: str, body: Union[None, dict, bytes] = None,
                 query: Optional[dict] = None, timeout: Optional[float] = None, stream: bool = False):
@@ -181,9 +223,29 @@ class Client:
         elif isinstance(body, (bytes, bytearray)):
             data = bytes(body)
             headers["Content-Type"] = "application/octet-stream"
+        safe = method in ("GET", "HEAD", "DELETE", "PUT") or (isinstance(body, dict) and bool(body.get("idempotency_key")))
+        retries = self.max_retries if safe else 0
+        for attempt in range(retries + 1):
+            try:
+                return self._once(method, url, data, headers, timeout, stream)
+            except SandboxError as e:
+                if attempt >= retries:
+                    raise
+                if e.status in _RETRY_STATUS or (e.status == 0 and getattr(e, "_conn", False)):
+                    delay = e.retry_after if e.retry_after is not None else min(8.0, 0.5 * 2 ** attempt) * (0.5 + random.random() / 2)
+                elif e.status == 429 and e.retry_after is not None:
+                    delay = e.retry_after
+                else:
+                    raise
+                if delay > 60:
+                    raise
+                time.sleep(delay)
+        raise AssertionError("unreachable")
+
+    def _once(self, method, url, data, headers, timeout, stream):
         req = urllib.request.Request(url, data=data, method=method, headers=headers)
         try:
-            resp = urllib.request.urlopen(req, timeout=timeout or self.timeout)
+            resp = _urlopen(req, timeout or self.timeout)
         except urllib.error.HTTPError as e:
             try:
                 raw = e.read().decode(errors="replace")
@@ -203,8 +265,10 @@ class Client:
                     code = parsed["code"]
             retry_after = _parse_retry_after(e.headers.get("Retry-After") if e.headers is not None else None)
             raise SandboxError(e.code, msg, code=code, retry_after=retry_after, body=body) from None
-        except urllib.error.URLError as e:
-            raise SandboxError(0, f"cannot connect to {self.url}: {e.reason}") from None
+        except (urllib.error.URLError, ConnectionError, TimeoutError) as e:
+            err = SandboxError(0, f"cannot connect to {self.url}: {getattr(e, 'reason', e)}")
+            err._conn = True  # přechodná chyba spojení – bezpečný požadavek se zopakuje
+            raise err from None
         if stream:
             return resp
         with resp:
@@ -223,6 +287,19 @@ class Files:
     def read(self, path: str) -> bytes:
         """Download a file as bytes."""
         return self._sb._c.request("GET", f"/v1/sandboxes/{self._sb.id}/files", query={"path": path})
+
+    def download(self, path: str, dest: str) -> None:
+        """Download a file to a local path in chunks (large files never sit in memory)."""
+        resp = self._sb._c.request("GET", f"/v1/sandboxes/{self._sb.id}/files", query={"path": path},
+                                   timeout=3600, stream=True)
+        tmp = dest + ".part"
+        with resp, open(tmp, "wb") as f:
+            while True:
+                chunk = resp.read(1 << 20)
+                if not chunk:
+                    break
+                f.write(chunk)
+        os.replace(tmp, dest)
 
     def read_text(self, path: str, encoding: str = "utf-8") -> str:
         """Download a text file."""
@@ -268,8 +345,9 @@ class Screenshot:
 
 
 class Computer:
-    """The graphical desktop of a sandbox (sandbox.computer) – beta, needs the "desktop" template
-    and the Desktop & Computer Use feature enabled for your account.
+    """The graphical desktop of a sandbox (sandbox.computer) – needs the "desktop" template
+    and the Desktop & Computer Use feature on your account (paid plans, or after topping up
+    at least US$15).
 
         with Sandbox.create(template="desktop") as sb:
             sb.computer.click(640, 400)
@@ -523,7 +601,7 @@ class Sandbox:
 
     @property
     def computer(self) -> Computer:
-        """The graphical desktop (template "desktop", beta): screenshots, mouse and keyboard."""
+        """The graphical desktop (template "desktop"): screenshots, mouse and keyboard."""
         return Computer(self)
 
     def kill(self) -> None:
@@ -697,6 +775,10 @@ class Sandbox:
                     on_stderr and on_stderr(ev["data"])
                 elif ev["type"] == "exit":
                     last = ev
+            if not last:
+                # proud skončil bez události exit (přerušené spojení) – jako TS SDK chyba, ne exit_code -1
+                raise SandboxError(0, "the output stream ended before the command finished (connection lost); "
+                                      "the command may still be running in the sandbox")
             return CommandResult(last.get("exit_code", -1), "".join(out), "".join(err),
                                  last.get("duration_ms", 0), last.get("timed_out", False),
                                  bool(last.get("truncated", False)))
@@ -916,18 +998,40 @@ class Job:
     def artifacts(self) -> List[dict]:
         return self._c.request("GET", f"/v1/jobs/{self.id}/artifacts")["artifacts"]
 
-    def download(self, name: str, dest: Optional[str] = None) -> bytes:
-        """Download a result file; verifies its SHA-256. Writes it to dest when given."""
-        import hashlib
+    def download(self, name: str, dest: Optional[str] = None, verify: bool = True) -> Optional[bytes]:
+        """Download a result file and verify its SHA-256 against the X-WBX-SHA256 header the server
+        sends with it (missing or wrong checksum = SandboxError; verify=False skips the check).
+
+        With dest the file is streamed to disk in chunks (large files never sit in memory) and None
+        is returned; a file that fails the check is removed. Without dest the bytes are returned."""
         path = "/".join(urllib.parse.quote(p, safe="") for p in name.split("/"))
-        data = self._c.request("GET", f"/v1/jobs/{self.id}/artifacts/{path}", timeout=3600)
-        want = next((a["sha256"] for a in self.artifacts() if a["name"] == name), None)
-        if want and hashlib.sha256(data).hexdigest() != want:
-            raise SandboxError(0, f"checksum mismatch for {name}")
-        if dest:
-            with open(dest, "wb") as f:
-                f.write(data)
-        return data
+        resp = self._c.request("GET", f"/v1/jobs/{self.id}/artifacts/{path}", timeout=3600, stream=True)
+        with resp:
+            want = (resp.headers.get("X-WBX-SHA256") or "").strip().lower()
+            if verify and len(want) != 64:
+                raise SandboxError(0, f"missing checksum for {name}: the response has no valid X-WBX-SHA256 header "
+                                      "(pass verify=False to skip the check)")
+            h = hashlib.sha256()
+            if dest is None:
+                data = resp.read()
+                h.update(data)
+            else:
+                tmp = dest + ".part"
+                with open(tmp, "wb") as f:
+                    while True:
+                        chunk = resp.read(1 << 20)
+                        if not chunk:
+                            break
+                        h.update(chunk)
+                        f.write(chunk)
+        if verify and h.hexdigest() != want:
+            if dest is not None:
+                os.remove(tmp)
+            raise SandboxError(0, f"checksum mismatch for {name}: expected {want}, got {h.hexdigest()}")
+        if dest is None:
+            return data
+        os.replace(tmp, dest)
+        return None
 
     def cancel(self) -> "Job":
         self.data = self._c.request("POST", f"/v1/jobs/{self.id}/cancel", body={})
@@ -935,9 +1039,7 @@ class Job:
 
     def retry(self, env: Optional[Dict[str, str]] = None, idempotency_key: Optional[str] = None) -> "Job":
         """Start a new job with the same inputs (pass env again – values are not stored)."""
-        body = {"env": env or {}}
-        if idempotency_key:
-            body["idempotency_key"] = idempotency_key
+        body = {"env": env or {}, "idempotency_key": idempotency_key or "py-" + uuid.uuid4().hex}
         return Job(self._c.request("POST", f"/v1/jobs/{self.id}/retry", body=body), self._c)
 
     def __repr__(self) -> str:
@@ -1049,6 +1151,8 @@ def run_job(command: Optional[str] = None, template: Optional[str] = None, timeo
         template = "base"
     if wasm and timeout_seconds == 3600:
         timeout_seconds = 60
+    # klíč idempotence vždy: opakované odeslání po výpadku spojení nespustí úlohu dvakrát
+    idempotency_key = idempotency_key or "py-" + uuid.uuid4().hex
     body = job_body(command, template, timeout_seconds, artifacts, save_artifacts, required_artifacts, env, cwd,
                     internet, allow, max_cost_eur, max_attempts, retry_on, metadata, idempotency_key, **kw)
     c = Client(url, api_key)
@@ -1129,8 +1233,7 @@ def run_batch(jobs: List[dict], defaults: Optional[dict] = None, max_concurrency
         body["max_total_cost_eur"] = str(max_total_cost_eur)
     if name:
         body["name"] = name
-    if idempotency_key:
-        body["idempotency_key"] = idempotency_key
+    body["idempotency_key"] = idempotency_key or "py-" + uuid.uuid4().hex
     c = Client(url, api_key)
     return Batch(c.request("POST", "/v1/batches", body=body), c)
 
