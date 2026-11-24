@@ -14,7 +14,7 @@ What it covers:
 - **Metrics** – CPU, memory, network and disk measured by the host, history and live stream
 - **Snapshots and clones** – save a sandbox disk, start new sandboxes from it, or make up to
   10 copies of a sandbox in one call; copies keep the source's lifetime and network settings
-- **Desktop & Computer Use** (beta, enabled on request) – screenshots, mouse and keyboard
+- **Desktop & Computer Use** (paid plans, or after topping up at least US$15) – screenshots, mouse and keyboard
 - **`wbx connect`** – an interactive shell in a running sandbox
 
 Full reference: https://sandbox.wbx.cz/docs/sdk
@@ -93,6 +93,10 @@ Interactive terminal in a running sandbox (installed as the `wbx` command):
 
     wbx connect sb_...
 
+The key comes from `WBXSANDBOX_API_KEY`, or from a file with `--key-file PATH`
+(`--key-file -` reads it from standard input) – not from the command line, where other
+users could see it in the process list.
+
 Behind an HTTP proxy, set `HTTPS_PROXY` – the terminal connects through it.
 
 Metrics – CPU, memory, network and disk of a running sandbox, measured by the host every
@@ -117,7 +121,7 @@ Neither call wakes a sleeping sandbox. A feature that is not enabled for your ac
 Snapshots and clones – save a sandbox disk and start copies of it; see
 [Snapshots and clones](#snapshots-and-clones) below.
 
-Desktop control (template `desktop`, feature `desktop` – beta, enabled on request):
+Desktop control (template `desktop`, feature `desktop` – on paid plans or after topping up at least US$15):
 
 ```python
 from wbxsandbox import ComputerActionError
@@ -168,7 +172,11 @@ The TypeScript SDK has the same fields on `APIError` (`status`, `code`, `retryAf
 
 Timeouts: the SDK waits up to 120 s for an answer unless the call sets its own limit –
 `run()` the command's `timeout` + 30 s, desktop actions 5 minutes, `metrics_stream()`
-16 minutes, `job.download()` an hour. Failed requests are not retried automatically.
+16 minutes, `job.download()` an hour. Safe requests (GET, HEAD, DELETE, PUT and job
+submissions, which always carry an idempotency key) are retried up to twice after a connection
+error, 502/503/504 or 429 with `Retry-After`. The SDK talks to `https://` addresses only
+(plain `http://` just for localhost, or with `allow_insecure=True`) and does not follow
+redirects, so the API key never goes to another address.
 
 Documentation: https://sandbox.wbx.cz/docs · TypeScript SDK: `npm install wbxsandbox`
 (https://sandbox.wbx.cz/docs/sdk/typescript) · Pricing: https://sandbox.wbx.cz/pricing
