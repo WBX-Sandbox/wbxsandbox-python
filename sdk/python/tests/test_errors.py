@@ -27,7 +27,7 @@ def http_error(status, body, headers=None):
 class SandboxErrorTest(unittest.TestCase):
     def call(self, err):
         c = wbxsandbox.Client("https://x", "k")
-        with mock.patch("urllib.request.urlopen", side_effect=err):
+        with mock.patch("wbxsandbox._urlopen", side_effect=err):
             with self.assertRaises(SandboxError) as cm:
                 c.request("POST", "/v1/sandboxes", body={})
         return cm.exception

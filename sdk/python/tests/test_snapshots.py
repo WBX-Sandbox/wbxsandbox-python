@@ -14,7 +14,7 @@ SNAP = {"id": "snap_n1_0123456789abcdef", "name": "after-setup", "source_sandbox
 
 
 def client():
-    return wbxsandbox.Client("http://x", "k")
+    return wbxsandbox.Client("https://x", "k")
 
 
 class SnapshotTest(unittest.TestCase):
@@ -38,11 +38,11 @@ class SnapshotTest(unittest.TestCase):
     def test_list_get_delete(self):
         for answer in ([SNAP], {"snapshots": [SNAP]}):  # holé pole i objekt se seznamem
             with mock.patch.object(wbxsandbox.Client, "request", return_value=answer) as r:
-                out = Snapshot.list(url="http://x", api_key="k")
+                out = Snapshot.list(url="https://x", api_key="k")
             self.assertEqual(r.call_args.args, ("GET", "/v1/snapshots"))
             self.assertEqual([s.id for s in out], [SNAP["id"]])
         with mock.patch.object(wbxsandbox.Client, "request", return_value=SNAP) as r:
-            snap = Snapshot.get(SNAP["id"], url="http://x", api_key="k")
+            snap = Snapshot.get(SNAP["id"], url="https://x", api_key="k")
         self.assertEqual(r.call_args.args, ("GET", "/v1/snapshots/" + SNAP["id"]))
         with mock.patch.object(wbxsandbox.Client, "request", return_value=None) as r:
             snap.delete()
@@ -58,7 +58,7 @@ class SnapshotTest(unittest.TestCase):
     def test_create_from_snapshot(self):
         sb = {"id": "sb_n1_b", "template": "base", "state": "running"}
         with mock.patch.object(wbxsandbox.Client, "request", return_value=sb) as r:
-            out = Sandbox.create(from_snapshot=SNAP["id"], timeout=600, env={"A": "1"}, url="http://x", api_key="k")
+            out = Sandbox.create(from_snapshot=SNAP["id"], timeout=600, env={"A": "1"}, url="https://x", api_key="k")
         body = r.call_args.kwargs["body"]
         self.assertEqual(body["from_snapshot"], SNAP["id"])
         self.assertNotIn("template", body)  # šablona je šablona snapshotu
@@ -67,14 +67,14 @@ class SnapshotTest(unittest.TestCase):
         # ze snapshotu se kopíruje disk – delší HTTP limit než výchozích 120 s
         self.assertEqual(r.call_args.kwargs["timeout"], 300)
         # Snapshot.create_sandbox použije stejného klienta (adresu a klíč)
-        snap = Snapshot._from(SNAP, wbxsandbox.Client("http://y", "k2"))
+        snap = Snapshot._from(SNAP, wbxsandbox.Client("https://y", "k2"))
         with mock.patch.object(wbxsandbox.Client, "request", return_value=sb) as r:
             snap.create_sandbox(timeout=60)
         self.assertEqual(r.call_args.kwargs["body"]["from_snapshot"], SNAP["id"])
         self.assertEqual(r.call_args.args[0], "POST")
         # bez snapshotu zůstává výchozí šablona base
         with mock.patch.object(wbxsandbox.Client, "request", return_value=sb) as r:
-            Sandbox.create(url="http://x", api_key="k")
+            Sandbox.create(url="https://x", api_key="k")
         self.assertEqual(r.call_args.kwargs["body"]["template"], "base")
         self.assertIsNone(r.call_args.kwargs.get("timeout"))  # běžné vytvoření: výchozí limit klienta
         self.assertNotIn("from_snapshot", r.call_args.kwargs["body"])

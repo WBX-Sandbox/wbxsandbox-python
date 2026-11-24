@@ -15,7 +15,7 @@ class ListTest(unittest.TestCase):
         with mock.patch.object(wbxsandbox.Client, "request", return_value={"jobs": [{"id": "job_a"}]}) as r:
             out = wbxsandbox.list_jobs(status="failed", batch_id="bat_x", cursor="job_c", limit=5,
                                        since=datetime(2026, 11, 15, 9, 0, tzinfo=timezone(timedelta(hours=1))),
-                                       url="http://x", api_key="k")
+                                       url="https://x", api_key="k")
         self.assertEqual(out, [{"id": "job_a"}])
         self.assertEqual(r.call_args.kwargs["query"], {"limit": 5, "status": "failed", "batch_id": "bat_x",
                                                        "since": "2026-11-15T08:00:00Z", "cursor": "job_c"})
@@ -27,7 +27,7 @@ class ListTest(unittest.TestCase):
 
     def test_list_batches(self):
         with mock.patch.object(wbxsandbox.Client, "request", return_value={"batches": [], "next_cursor": None}) as r:
-            self.assertEqual(wbxsandbox.list_batches(since="2026-11-01T00:00:00Z", cursor="bat_b", url="http://x", api_key="k"), [])
+            self.assertEqual(wbxsandbox.list_batches(since="2026-11-01T00:00:00Z", cursor="bat_b", url="https://x", api_key="k"), [])
         self.assertEqual(r.call_args.args[:2], ("GET", "/v1/batches"))
         self.assertEqual(r.call_args.kwargs["query"], {"limit": 20, "since": "2026-11-01T00:00:00Z", "cursor": "bat_b"})
         self.assertIn("list_batches", wbxsandbox.__all__)
@@ -35,7 +35,7 @@ class ListTest(unittest.TestCase):
 
 class FilesTest(unittest.TestCase):
     def setUp(self):
-        self.sb = wbxsandbox.Sandbox._from({"id": "sb_1", "template": "base"}, wbxsandbox.Client("http://x", "k"))
+        self.sb = wbxsandbox.Sandbox._from({"id": "sb_1", "template": "base"}, wbxsandbox.Client("https://x", "k"))
 
     def test_mkdir_and_remove(self):
         with mock.patch.object(wbxsandbox.Client, "request", return_value=None) as r:
