@@ -52,7 +52,7 @@ A named sandbox that falls asleep instead of being destroyed – its files are t
 sb = Sandbox.create(template="base", name="my-project", on_timeout="pause", idle_timeout=600,
                     keep_days=30)  # kept 30 days after it falls asleep (up to your plan's limit)
 sb.files.write("/home/user/notes.txt", "kept while asleep")
-sb.sleep()                                   # files kept, programs stop, no compute billed
+sb.sleep()                                   # files and running programs kept, no compute billed
 sb = Sandbox.create(name="my-project")       # same sandbox, woken up
 ```
 
@@ -260,6 +260,29 @@ Limits and errors:
   a clone.
 
 Details: https://sandbox.wbx.cz/docs/sandboxes/snapshots
+
+## Published apps
+
+Put an app running in a sandbox at a permanent public address – anyone can open it without a
+token. The sandbox is kept while the app is published, sleeps without visitors and wakes on the
+next visit; when nothing listens on the port, `start_command` runs. Paid plans
+(`SandboxError` 403 `feature_disabled` otherwise).
+
+```python
+from wbxsandbox import App
+
+app = sb.publish("dog-club", 8000, start_command="python3 app.py")
+print(app.url)                                   # https://dog-club.box.wbxbox.net/
+
+d = app.add_domain("booking.example.com")        # your own domain
+print(d["state"], d["dns"]["cname"])             # pending – create this CNAME record
+
+for a in App.list():
+    print(a.name, a.url, [(x["domain"], x["state"]) for x in a.domains])
+app.unpublish()                                  # the sandbox stays
+```
+
+Details: https://sandbox.wbx.cz/docs/sandboxes/apps
 
 ## Versioning
 

@@ -3,6 +3,22 @@
 Changes of the Python SDK from 0.16.0 on (earlier versions are listed in the platform
 changelog). The SDK has its own patch numbers; `major.minor` follows the platform release line.
 
+## [0.20.0] – 2026-11-26
+
+### Added
+
+- **Published apps:** `Sandbox.publish(name, port, start_command=None, cwd=None)` puts an app from
+  the sandbox at a permanent public address without a token (`https://<name>.box.wbxbox.net`).
+  `App.publish()`, `App.list()`, `App.get(name)`, `app.unpublish()`.
+- **Own domains:** `app.add_domain("booking.example.com")` returns the domain with its `state` and the
+  DNS records to create (`dns.cname`, or `dns.root` for a root domain); `app.remove_domain(...)`.
+  The certificate is issued automatically. Paid plans (`SandboxError` 403 `feature_disabled`).
+
+### Changed
+
+- `sleep()` docstring: running programs continue after the wake-up (platform 0.17.9).
+- The version follows the platform release line 0.20.
+
 ## [0.17.0] – 2026-11-24
 
 ### Security
