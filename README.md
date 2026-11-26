@@ -4,7 +4,7 @@
 
 The official Python SDK for [WBX Sandbox](https://sandbox.wbx.cz): isolated Linux microVMs for
 AI agents and code execution. Every sandbox is a Firecracker virtual machine with its own kernel,
-disk and network rules, running on servers in the EU. One small package with **no dependencies**
+disk and network rules, running on servers in Europe. One small package with **no dependencies**
 – only the Python standard library, Python 3.9+.
 
 ```bash
@@ -36,6 +36,7 @@ print(job.wait().summary()["status"])                  # runs without an open co
 | **Snapshots and clones** | `sb.snapshot()` saves the disk; `Sandbox.create(from_snapshot=…)` and `sb.clone(count)` start new sandboxes from it – each copy gets its own ID, network and machine identity and keeps the source's lifetime and network settings | [Snapshots & clones](https://sandbox.wbx.cz/docs/sandboxes/snapshots) |
 | **Network and IPv6** | No network, an allowlist, blocked destinations; a public IPv6 address per sandbox (`ip="dual"`) | [Network](https://sandbox.wbx.cz/docs/sandboxes/network) |
 | **Public URLs** | HTTPS address with an access token for any port (`get_url(port)`) | [Public URLs](https://sandbox.wbx.cz/docs/sandboxes/urls) |
+| **Published apps** | `sb.publish(name, port)` – a permanent public address `https://<name>.box.wbxbox.net/` without a token, your own domain with an automatic certificate (`app.add_domain()`); the sandbox sleeps without visitors and wakes on the next visit | [Published apps](https://sandbox.wbx.cz/docs/sandboxes/apps) |
 | **Background jobs** | `run_job()` with result files, price limit, retries, idempotency; `wait()`, LLM-friendly log digest and test results, SHA-256-checked downloads, files passed between jobs | [Jobs](https://sandbox.wbx.cz/docs/jobs) |
 | **Batches** | `run_batch()` – up to 1,000 jobs with a concurrency and total price limit, dependencies, reports as JSON or CSV | [Batches](https://sandbox.wbx.cz/docs/jobs/batches) |
 | **WebAssembly jobs** | Run a WASI module as a job without a virtual machine | [WebAssembly](https://sandbox.wbx.cz/docs/jobs/wasm) |
