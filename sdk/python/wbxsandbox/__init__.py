@@ -63,13 +63,13 @@ import urllib.request
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Callable, Dict, Iterator, List, Optional, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, Union
 
-__version__ = "0.17.0"
+__version__ = "0.20.0"
 __all__ = ["Sandbox", "CommandResult", "SandboxError", "ComputerActionError", "Client", "Computer", "Screenshot", "Job", "run_job", "get_job", "list_jobs",
            "Batch", "run_batch", "get_batch", "list_batches", "job_input", "batch_input", "get_budget", "set_budget", "runtimes",
            "compute_preferences", "set_default_compute_class", "wait_jobs", "webhook_secret", "verify_webhook",
-           "receipt_keys", "verify_receipt", "features", "Snapshot", "CloneList"]
+           "receipt_keys", "verify_receipt", "features", "Snapshot", "CloneList", "App"]
 
 
 class SandboxError(Exception):
@@ -552,7 +552,7 @@ class Sandbox:
         name      optional name ("my-project"); if you already have a sandbox with this name it is
                   returned instead of a new one (woken up if it is asleep)
         on_timeout  "kill" (default) destroys the sandbox when its lifetime ends; "pause" puts it to
-                  sleep instead: files are kept (several days), running programs stop, and the next
+                  sleep instead: files and running programs are kept (several days), and the next
                   command wakes it up in a few seconds
         idle_timeout  with on_timeout="pause": fall asleep after this many seconds without commands
         keep_days  with on_timeout="pause": keep the sandbox this many days after it falls asleep
@@ -630,7 +630,7 @@ class Sandbox:
         self.state = self._c.request("POST", f"/v1/sandboxes/{self.id}/pause")["state"]
 
     def sleep(self) -> None:
-        """Put the sandbox to sleep: files are kept, running programs stop, no compute is billed.
+        """Put the sandbox to sleep: files and running programs are kept, no compute is billed.
         Any later command (or resume()) wakes it up in a few seconds."""
         self.state = self._c.request("POST", f"/v1/sandboxes/{self.id}/sleep")["state"]
 
@@ -643,6 +643,17 @@ class Sandbox:
     def resume(self) -> None:
         """Continue a paused sandbox exactly where it stopped, or wake up a sleeping one."""
         self.state = self._c.request("POST", f"/v1/sandboxes/{self.id}/resume")["state"]
+
+    def publish(self, name: str, port: int, start_command: Optional[str] = None, cwd: Optional[str] = None) -> "App":
+        """Publish an app running in this sandbox at a permanent public address without a token.
+
+        The address is ``https://<name>.<zone>`` (e.g. ``https://dog-club.box.wbxbox.net``); add
+        your own domain with ``App.add_domain()``. The sandbox is kept while published, sleeps
+        without visitors and wakes on the next visit; when nothing listens on ``port``,
+        ``start_command`` runs (in ``cwd``). Publishing the same name again changes the app.
+        Paid plans (403 feature_disabled otherwise); name taken or limit reached = 409.
+        """
+        return App.publish(self.id, port, name, start_command=start_command, cwd=cwd, url=self._c.url, api_key=self._c.api_key)
 
     # ------------------------------------------------------------ snapshots and clones (feature "snapshots")
 
@@ -900,6 +911,95 @@ class Snapshot:
         kw.setdefault("url", self._c.url)
         kw.setdefault("api_key", self._c.api_key)
         return Sandbox.create(from_snapshot=self.id, **kw)
+
+
+# --------------------------------------------------------------------------- published apps
+
+@dataclass
+class App:
+    """An app published from a sandbox at a permanent public address (no token).
+
+        app = sb.publish("dog-club", 8000, start_command="python3 app.py")
+        print(app.url)                                   # https://dog-club.box.wbxbox.net/
+        d = app.add_domain("booking.example.com")        # d["dns"]["cname"] – the record to create
+        App.list(); app.remove_domain("booking.example.com"); app.unpublish()
+
+    ``domains`` lists your own domains with their ``state`` (pending → issuing → active) and,
+    until they are active, the DNS records to create (``dns``). ``disabled`` is set when the
+    operator turned the app off.
+    """
+
+    name: str
+    url: str = ""
+    sandbox_id: str = ""
+    port: int = 0
+    start_command: str = ""
+    cwd: str = ""
+    domains: List[dict] = field(default_factory=list)
+    created_at: str = ""
+    disabled: str = ""
+    info: Dict = field(default_factory=dict)   # the whole API record
+    _c: Client = field(default=None, repr=False)
+
+    @classmethod
+    def _from(cls, d: dict, c: Client) -> "App":
+        d = d or {}
+        return cls(name=d.get("name", ""), url=d.get("url") or "", sandbox_id=d.get("sandbox_id") or "", port=int(d.get("port") or 0),
+                   start_command=d.get("start_command") or "", cwd=d.get("cwd") or "", domains=list(d.get("domains") or []),
+                   created_at=d.get("created_at") or "", disabled=d.get("disabled") or "", info=dict(d), _c=c)
+
+    @classmethod
+    def publish(cls, sandbox_id: str, port: int, name: str, start_command: Optional[str] = None, cwd: Optional[str] = None,
+                url: Optional[str] = None, api_key: Optional[str] = None) -> "App":
+        """Publish port ``port`` of sandbox ``sandbox_id`` as ``name`` (see Sandbox.publish)."""
+        c = Client(url, api_key)
+        body: Dict[str, Any] = {"sandbox_id": sandbox_id, "port": int(port), "name": name}
+        if start_command:
+            body["start_command"] = start_command
+        if cwd:
+            body["cwd"] = cwd
+        return cls._from(c.request("POST", "/v1/apps", body=body), c)
+
+    @classmethod
+    def list(cls, url: Optional[str] = None, api_key: Optional[str] = None) -> List["App"]:
+        """Your published apps."""
+        c = Client(url, api_key)
+        d = c.request("GET", "/v1/apps")
+        rows = d.get("apps") if isinstance(d, dict) else d
+        return [cls._from(x, c) for x in rows or []]
+
+    @classmethod
+    def get(cls, name: str, url: Optional[str] = None, api_key: Optional[str] = None) -> "App":
+        """One of your apps by name (SandboxError 404 when there is none)."""
+        for a in cls.list(url, api_key):
+            if a.name == name:
+                return a
+        raise SandboxError(404, f"app {name} not found", "not_found")
+
+    def unpublish(self) -> None:
+        """Remove the public address and the app's domains (no error if already gone). The sandbox stays."""
+        try:
+            self._c.request("DELETE", f"/v1/apps/{urllib.parse.quote(self.name, safe='')}")
+        except SandboxError as e:
+            if e.status != 404:
+                raise
+
+    def add_domain(self, domain: str) -> dict:
+        """Add your own domain. Returns its record: ``state`` and, until active, ``dns`` with the
+        records to create (``cname`` for a subdomain, ``root`` = A/AAAA + TXT for a root domain).
+        The certificate is issued automatically once DNS points to us."""
+        d = self._c.request("POST", f"/v1/apps/{urllib.parse.quote(self.name, safe='')}/domains", body={"domain": domain})
+        self.domains = [x for x in self.domains if x.get("domain") != d.get("domain")] + [d]
+        return d
+
+    def remove_domain(self, domain: str) -> None:
+        """Remove one of the app's domains (no error if it is already gone)."""
+        try:
+            self._c.request("DELETE", f"/v1/apps/{urllib.parse.quote(self.name, safe='')}/domains/{urllib.parse.quote(domain.lower(), safe='')}")
+        except SandboxError as e:
+            if e.status != 404:
+                raise
+        self.domains = [x for x in self.domains if x.get("domain") != domain.lower()]
 
 
 # --------------------------------------------------------------------------- background jobs
